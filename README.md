@@ -2,6 +2,8 @@
 
 [Play pokeemerald-3d](https://3d.pokeemerald.com/)
 
+[Join our Discord server](https://discord.gg/u24yh5b83N)
+
 https://github.com/user-attachments/assets/791051d6-8878-4b22-a011-959806617956
 
 Pokemon Emerald in 3D (in WebAssembly)
