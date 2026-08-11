@@ -1669,6 +1669,7 @@ function automationMapGrid(radius = 14) {
       row.push({
         x,
         y,
+        metatileId: instance.exports.MapGridGetMetatileIdAt(x + 7, y + 7),
         collision: instance.exports.MapGridGetCollisionAt(x + 7, y + 7),
         elevation: instance.exports.MapGridGetElevationAt(x + 7, y + 7),
         behavior: instance.exports.MapGridGetMetatileBehaviorAt(x + 7, y + 7),
@@ -1677,6 +1678,90 @@ function automationMapGrid(radius = 14) {
     cells.push(row);
   }
   return {state, radius, cells};
+}
+
+function automationHd2dCourses(radius = 12) {
+  if (!Number.isInteger(radius) || radius < 1 || radius > 32) throw new Error('invalid HD-2D course radius');
+  const worldWidth = instance.exports.WasmWorldWidth();
+  const worldHeight = instance.exports.WasmWorldHeight();
+  const heights = new Int8Array(memory.buffer, instance.exports.WasmWorldHeightBuffer(), instance.exports.WasmWorldHeightBufferSize());
+  const grounds = new Int8Array(memory.buffer, instance.exports.WasmWorldGroundHeightBuffer(), instance.exports.WasmWorldGroundHeightBufferSize());
+  const geometry = new Uint16Array(memory.buffer, instance.exports.WasmWorldGeometryBuffer(), instance.exports.WasmWorldGeometryBufferSize() / 2);
+  const cx = Math.floor(worldWidth / 2);
+  const cy = Math.floor(worldHeight / 2);
+  const gridOffsetX = instance.exports.WasmWorldGridOffsetX();
+  const gridOffsetY = instance.exports.WasmWorldGridOffsetY();
+  const terrainOriginX = gridOffsetX - 8;
+  const terrainOriginY = gridOffsetY - 8;
+  const anchorX = terrainOriginX + Math.floor((cx - terrainOriginX) / 8) * 8 + 4;
+  const anchorY = terrainOriginY + Math.floor((cy - terrainOriginY) / 8) * 8 + 4;
+  const worldOriginX = instance.exports.WasmWorldPixelOriginX();
+  const worldOriginY = instance.exports.WasmWorldPixelOriginY();
+  const rows = [];
+  for (let dy = -radius; dy <= radius; dy++) {
+    const row = [];
+    for (let dx = -radius; dx <= radius; dx++) {
+      const px = Math.min(worldWidth - 1, Math.max(0, anchorX + dx * 8));
+      const py = Math.min(worldHeight - 1, Math.max(0, anchorY + dy * 8));
+      const i = py * worldWidth + px;
+      const mapX = Math.floor((worldOriginX + px) / 16);
+      const mapY = Math.floor((worldOriginY + py) / 16);
+      const metatileId = instance.exports.MapGridGetMetatileIdAt(mapX + 7, mapY + 7);
+      row.push({
+        mapX,
+        mapY,
+        metatileId,
+        collision: instance.exports.MapGridGetCollisionAt(mapX + 7, mapY + 7),
+        h: heights[i],
+        g: grounds[i],
+        geo: geometry[i],
+      });
+    }
+    rows.push(row);
+  }
+  return {
+    worldWidth, worldHeight, cx, cy, gridOffsetX, gridOffsetY,
+    anchorX, anchorY, worldOriginX, worldOriginY, radius, rows,
+  };
+}
+
+function imageDataUrl(pixels, width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext('2d').putImageData(new ImageData(pixels, width, height), 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+function automationWorldAtlas() {
+  const worldWidth = instance.exports.WasmWorldWidth();
+  const worldHeight = instance.exports.WasmWorldHeight();
+  const pixels = new Uint8ClampedArray(memory.buffer, instance.exports.WasmWorldBuffer(), worldWidth * worldHeight * 4);
+  return { worldWidth, worldHeight, dataUrl: imageDataUrl(pixels.slice(), worldWidth, worldHeight) };
+}
+
+function automationHeightMap() {
+  const worldWidth = instance.exports.WasmWorldWidth();
+  const worldHeight = instance.exports.WasmWorldHeight();
+  const heights = new Int8Array(memory.buffer, instance.exports.WasmWorldHeightBuffer(), worldWidth * worldHeight);
+  const geometry = new Uint16Array(memory.buffer, instance.exports.WasmWorldGeometryBuffer(), worldWidth * worldHeight);
+  const pixels = new Uint8ClampedArray(worldWidth * worldHeight * 4);
+  for (let i = 0; i < worldWidth * worldHeight; i++) {
+    const value = Math.max(0, Math.min(255, Math.round((heights[i] + 8) * 255 / 40)));
+    const surface = geometry[i] & 7;
+    let red = value;
+    let green = value;
+    let blue = value;
+    if (surface === 1) { red = value * 0.3; green = value * 0.5; blue = 255; }
+    else if (surface === 2) { red = 255; green = value * 0.4; blue = value * 0.4; }
+    else if (surface === 3) { red = value * 0.3; green = 255; blue = value * 0.3; }
+    else if (surface === 4) { red = 255; green = 255; blue = value * 0.3; }
+    pixels[i * 4] = red;
+    pixels[i * 4 + 1] = green;
+    pixels[i * 4 + 2] = blue;
+    pixels[i * 4 + 3] = 255;
+  }
+  return { worldWidth, worldHeight, dataUrl: imageDataUrl(pixels, worldWidth, worldHeight) };
 }
 
 function automationEncounters(enabled) {
@@ -1695,6 +1780,9 @@ function automationApi() {
     setEncounters: automationEncounters,
     setRunningShoes: automationRunningShoes,
     mapGrid: automationMapGrid,
+    hd2dCourses: automationHd2dCourses,
+    worldAtlas: automationWorldAtlas,
+    heightMap: automationHeightMap,
     setButton: setAutomationButton,
     setAvatar: automationAvatar,
     setWeather: automationWeather,

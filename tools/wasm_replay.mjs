@@ -112,8 +112,8 @@ function parseEvents(text) {
     }
 
     if (fields[1] === 'probe') {
-      if (fields.length !== 3 || !['hblank-dma-win0h', 'trainer-id-nonzero', 'renderer-fps', 'object-descriptors', 'object-events', 'state', 'map-grid'].includes(fields[2])) {
-        throw new Error(`${index + 1}: expected "<frame> probe <hblank-dma-win0h|trainer-id-nonzero|renderer-fps|object-descriptors|object-events|state|map-grid>"`);
+      if (fields.length !== 3 || !['hblank-dma-win0h', 'trainer-id-nonzero', 'renderer-fps', 'object-descriptors', 'object-events', 'state', 'map-grid', 'hd2d-courses', 'world-atlas', 'height-map'].includes(fields[2])) {
+        throw new Error(`${index + 1}: expected "<frame> probe <hblank-dma-win0h|trainer-id-nonzero|renderer-fps|object-descriptors|object-events|state|map-grid|hd2d-courses|world-atlas|height-map>"`);
       }
       events.push({ frame, type: 'probe', name: fields[2] });
       continue;
@@ -284,10 +284,26 @@ async function saveScreenshot(cdp, outputDir, event) {
   return { file, state };
 }
 
-async function runProbe(cdp, event) {
+async function runProbe(cdp, event, outputDir) {
   if (event.name === 'map-grid') {
     const result = await evaluate(cdp, `window.pokeemerald.automation.mapGrid()`);
     return { frame: event.frame, name: event.name, result };
+  }
+  if (event.name === 'hd2d-courses') {
+    const result = await evaluate(cdp, `window.pokeemerald.automation.hd2dCourses()`);
+    return { frame: event.frame, name: event.name, result };
+  }
+  if (event.name === 'world-atlas' || event.name === 'height-map') {
+    const method = event.name === 'world-atlas' ? 'worldAtlas' : 'heightMap';
+    const result = await evaluate(cdp, `window.pokeemerald.automation.${method}()`);
+    const base64 = result.dataUrl.split(',')[1];
+    const file = resolve(outputDir, `screenshots/${String(event.frame).padStart(6, '0')}-${event.name}.png`);
+    await writeFile(file, Buffer.from(base64, 'base64'));
+    return {
+      frame: event.frame,
+      name: event.name,
+      result: { worldWidth: result.worldWidth, worldHeight: result.worldHeight, file },
+    };
   }
   if (event.name === 'state') {
     const result = await evaluate(cdp, `window.pokeemerald.automation.state()`);
@@ -401,7 +417,7 @@ async function main() {
       } else if (event.type === 'screenshot') {
         screenshots.push(await saveScreenshot(cdp, outputDir, event));
       } else if (event.type === 'probe') {
-        probes.push(await runProbe(cdp, event));
+        probes.push(await runProbe(cdp, event, outputDir));
       }
     }
     await writeFile(resolve(outputDir, 'summary.json'), JSON.stringify({ input: basename(inputPath), frameUnit: 'emulated_game_frame', view: options.view, shading: options.shading, zoom: options.zoom, perspective: options.perspective, optics: options.optics, renderScale: options.renderScale, screenshots, probes, errors }, null, 2));

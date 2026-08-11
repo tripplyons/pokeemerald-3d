@@ -1,0 +1,19 @@
+# Reproduce and verify the Route 110 Seaside Cycling Road HD-2D rendering.
+# Route110 is map group 0, map number 25. The elevated cycling road deck
+# (MB_BRIDGE_OVER_OCEAN) must stay one flat plane over the ocean instead of
+# collapsing into stair-stepped blocks.
+120 warp 0 25 11 50
+320 screenshot route110-deck-water
+320 probe state
+321 probe hd2d-courses
+322 probe world-atlas
+323 probe height-map
+324 warp 0 25 20 31
+524 screenshot route110-deck-horizontal
+524 probe state
+525 warp 0 25 27 15
+725 screenshot route110-deck-curve
+725 probe state
+726 warp 0 25 7 60
+926 screenshot route110-open-water
+926 probe state
