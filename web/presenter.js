@@ -958,6 +958,53 @@ class WebGpuPresenter {
     const SURFACE_WALL = 5;
     const SURFACE_ROOF = 6;
 
+    // A vertical face is an extrusion of one authored source tile, not a
+    // stretched edge texel. Keep each course within that tile and align its
+    // top edge with the corresponding source edge so neighboring faces do not
+    // develop a UV seam. The source tile is deliberately supplied by the
+    // caller: ordinary terrain uses its exposed tile, while building closure
+    // uses the nearest authored roof boundary tile.
+    const verticalSide = (tx, ty, bottom, height, sourceX, sourceY, dx, dy,
+                          normal, material, shell = 0, base = 0) => {
+      if (bottom >= height) return;
+      const u0 = pixelU(originX + sourceX * TILE_SIZE);
+      const u1 = pixelU(originX + sourceX * TILE_SIZE + TILE_SIZE - 1);
+      const v0 = pixelV(originY + sourceY * TILE_SIZE);
+      const v1 = pixelV(originY + sourceY * TILE_SIZE + TILE_SIZE - 1);
+      for (let courseBottom = bottom; courseBottom < height; courseBottom += TILE_SIZE) {
+        const courseTop = Math.min(height, courseBottom + TILE_SIZE);
+        if (dy < 0) {
+          const z = worldZ(ty);
+          quad([worldX(tx + 1),courseBottom,z,u1,v1],
+               [worldX(tx),courseBottom,z,u0,v1],
+               [worldX(tx),courseTop,z,u0,v0],
+               [worldX(tx + 1),courseTop,z,u1,v0],
+               normal, material, shell, base);
+        } else if (dy > 0) {
+          const z = worldZ(ty + 1);
+          quad([worldX(tx),courseBottom,z,u0,v0],
+               [worldX(tx + 1),courseBottom,z,u1,v0],
+               [worldX(tx + 1),courseTop,z,u1,v1],
+               [worldX(tx),courseTop,z,u0,v1],
+               normal, material, shell, base);
+        } else if (dx < 0) {
+          const x = worldX(tx);
+          quad([x,courseBottom,worldZ(ty),u1,v0],
+               [x,courseBottom,worldZ(ty + 1),u1,v1],
+               [x,courseTop,worldZ(ty + 1),u0,v1],
+               [x,courseTop,worldZ(ty),u0,v0],
+               normal, material, shell, base);
+        } else {
+          const x = worldX(tx + 1);
+          quad([x,courseBottom,worldZ(ty + 1),u0,v1],
+               [x,courseBottom,worldZ(ty),u0,v0],
+               [x,courseTop,worldZ(ty),u1,v0],
+               [x,courseTop,worldZ(ty + 1),u1,v1],
+               normal, material, shell, base);
+        }
+      }
+    };
+
     // Merge source-aligned horizontal courses. Roofs merge only when C says
     // they have the same frame-local owner; facade source is never a floor.
     const visited = new Uint8Array(cols * rows);
@@ -1173,21 +1220,8 @@ class WebGpuPresenter {
           if (neighborIsShell) continue;
           const bottom = Math.max(component.base, heightAt(tx + dx, ty));
           if (bottom >= top) continue;
-          const x = worldX(tx + (dx > 0 ? 1 : 0));
-          const u = pixelU(originX + sourceX * TILE_SIZE + (dx > 0 ? TILE_SIZE - 1 : 0));
-          if (dx < 0) {
-            quad([x,bottom,worldZ(ty),u,textureV(sourceY)],
-                 [x,bottom,worldZ(ty + 1),u,textureV(sourceY + 1)],
-                 [x,top,worldZ(ty + 1),u,textureV(sourceY + 1)],
-                 [x,top,worldZ(ty),u,textureV(sourceY)],
-                 [-1, 0, 0], SURFACE_WALL, 1, component.base);
-          } else {
-            quad([x,bottom,worldZ(ty + 1),u,textureV(sourceY + 1)],
-                 [x,bottom,worldZ(ty),u,textureV(sourceY)],
-                 [x,top,worldZ(ty),u,textureV(sourceY)],
-                 [x,top,worldZ(ty + 1),u,textureV(sourceY + 1)],
-                 [1, 0, 0], SURFACE_WALL, 1, component.base);
-          }
+          verticalSide(tx, ty, bottom, top, sourceX, sourceY, dx, 0,
+                       [dx < 0 ? -1 : 1, 0, 0], SURFACE_WALL, 1, component.base);
         }
         const northIsShell = sameRoof(tx, ty - 1, component.id)
           || (inGrid(tx, ty - 1) && surfaceAt(tx, ty - 1) === SURFACE_WALL
@@ -1195,13 +1229,8 @@ class WebGpuPresenter {
         if (!northIsShell) {
           const bottom = Math.max(component.base, heightAt(tx, ty - 1));
           if (bottom < top) {
-            const z = worldZ(ty);
-            const v = pixelV(originY + sourceY * TILE_SIZE);
-            quad([worldX(tx + 1),bottom,z,textureU(sourceX + 1),v],
-                 [worldX(tx),bottom,z,textureU(sourceX),v],
-                 [worldX(tx),top,z,textureU(sourceX),v],
-                 [worldX(tx + 1),top,z,textureU(sourceX + 1),v],
-                 [0, 0, -1], SURFACE_WALL, 1, component.base);
+            verticalSide(tx, ty, bottom, top, sourceX, sourceY, 0, -1,
+                         [0, 0, -1], SURFACE_WALL, 1, component.base);
           }
         }
       }
@@ -1215,19 +1244,8 @@ class WebGpuPresenter {
           if (sameRoof(tx + dx, ty, component.id)) continue;
           const bottom = Math.max(component.base, heightAt(tx + dx, ty));
           if (bottom >= height) continue;
-          const x = worldX(tx + (dx > 0 ? 1 : 0));
-          const u = pixelU(originX + tx * TILE_SIZE + (dx > 0 ? TILE_SIZE - 1 : 0));
-          const v0 = textureV(ty);
-          const v1 = textureV(ty + 1);
-          if (dx < 0) {
-            quad([x,bottom,worldZ(ty),u,v0], [x,bottom,worldZ(ty + 1),u,v1],
-                 [x,height,worldZ(ty + 1),u,v1], [x,height,worldZ(ty),u,v0],
-                 [-1, 0, 0], SURFACE_WALL, 1, component.base);
-          } else {
-            quad([x,bottom,worldZ(ty + 1),u,v1], [x,bottom,worldZ(ty),u,v0],
-                 [x,height,worldZ(ty),u,v0], [x,height,worldZ(ty + 1),u,v1],
-                 [1, 0, 0], SURFACE_WALL, 1, component.base);
-          }
+          verticalSide(tx, ty, bottom, height, tx, ty, dx, 0,
+                       [dx < 0 ? -1 : 1, 0, 0], SURFACE_WALL, 1, component.base);
         }
         for (const dy of [-1, 1]) {
           if (sameRoof(tx, ty + dy, component.id)) continue;
@@ -1235,21 +1253,8 @@ class WebGpuPresenter {
               && surfaceAt(tx, ty + 1) === SURFACE_WALL) continue;
           const bottom = Math.max(component.base, heightAt(tx, ty + dy));
           if (bottom >= height) continue;
-          const z = worldZ(ty + (dy > 0 ? 1 : 0));
-          const v = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));
-          if (dy < 0) {
-            quad([worldX(tx + 1),bottom,z,textureU(tx + 1),v],
-                 [worldX(tx),bottom,z,textureU(tx),v],
-                 [worldX(tx),height,z,textureU(tx),v],
-                 [worldX(tx + 1),height,z,textureU(tx + 1),v],
-                 [0, 0, -1], SURFACE_WALL, 1, component.base);
-          } else {
-            quad([worldX(tx),bottom,z,textureU(tx),v],
-                 [worldX(tx + 1),bottom,z,textureU(tx + 1),v],
-                 [worldX(tx + 1),height,z,textureU(tx + 1),v],
-                 [worldX(tx),height,z,textureU(tx),v],
-                 [0, 0, 1], SURFACE_WALL, 1, component.base);
-          }
+          verticalSide(tx, ty, bottom, height, tx, ty, 0, dy,
+                       [0, 0, dy < 0 ? -1 : 1], SURFACE_WALL, 1, component.base);
         }
       }
     }
@@ -1267,21 +1272,8 @@ class WebGpuPresenter {
         for (let tx = 0; tx < cols; tx++) {
           const edge = ordinaryEdge(tx, ty, 0, dy);
           if (!edge) continue;
-          const z = worldZ(ty + (dy > 0 ? 1 : 0));
-          const v = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));
-          if (dy < 0) {
-            quad([worldX(tx + 1),edge.bottom,z,textureU(tx + 1),v],
-                 [worldX(tx),edge.bottom,z,textureU(tx),v],
-                 [worldX(tx),edge.height,z,textureU(tx),v],
-                 [worldX(tx + 1),edge.height,z,textureU(tx + 1),v],
-                 [0, 0, -1], surfaceAt(tx, ty));
-          } else {
-            quad([worldX(tx),edge.bottom,z,textureU(tx),v],
-                 [worldX(tx + 1),edge.bottom,z,textureU(tx + 1),v],
-                 [worldX(tx + 1),edge.height,z,textureU(tx + 1),v],
-                 [worldX(tx),edge.height,z,textureU(tx),v],
-                 [0, 0, 1], surfaceAt(tx, ty));
-          }
+          verticalSide(tx, ty, edge.bottom, edge.height, tx, ty, 0, dy,
+                       [0, 0, dy < 0 ? -1 : 1], surfaceAt(tx, ty));
         }
       }
     }
@@ -1290,21 +1282,8 @@ class WebGpuPresenter {
         for (let ty = 0; ty < rows; ty++) {
           const edge = ordinaryEdge(tx, ty, dx, 0);
           if (!edge) continue;
-          const x = worldX(tx + (dx > 0 ? 1 : 0));
-          const u = pixelU(originX + tx * TILE_SIZE + (dx > 0 ? TILE_SIZE - 1 : 0));
-          if (dx < 0) {
-            quad([x,edge.bottom,worldZ(ty),u,textureV(ty)],
-                 [x,edge.bottom,worldZ(ty + 1),u,textureV(ty + 1)],
-                 [x,edge.height,worldZ(ty + 1),u,textureV(ty + 1)],
-                 [x,edge.height,worldZ(ty),u,textureV(ty)],
-                 [-1, 0, 0], surfaceAt(tx, ty));
-          } else {
-            quad([x,edge.bottom,worldZ(ty + 1),u,textureV(ty + 1)],
-                 [x,edge.bottom,worldZ(ty),u,textureV(ty)],
-                 [x,edge.height,worldZ(ty),u,textureV(ty)],
-                 [x,edge.height,worldZ(ty + 1),u,textureV(ty + 1)],
-                 [1, 0, 0], surfaceAt(tx, ty));
-          }
+          verticalSide(tx, ty, edge.bottom, edge.height, tx, ty, dx, 0,
+                       [dx < 0 ? -1 : 1, 0, 0], surfaceAt(tx, ty));
         }
       }
     }
