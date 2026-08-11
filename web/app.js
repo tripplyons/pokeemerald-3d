@@ -294,10 +294,24 @@ function updateVisualModeTransition(now = visualModeTransitionNow()) {
 
 function beginVisualModeTransition(mode, now = visualModeTransitionNow()) {
   updateVisualModeTransition(now);
-  if (mode === 'hd2d' && activeVisualMode === 'classic') {
+  if (mode === 'classic') {
+    // View topology is discrete. Keeping the HD-2D mesh active while camera
+    // depth eases toward zero projects the composed 2D atlas through partial
+    // 3D geometry instead of showing either complete view.
+    visualModeTransition = null;
     renderedShadingStrength = 0;
     renderedPerspectiveStrength = 0;
     renderedZoomStrength = 0;
+    renderedOpticsStrength = 0;
+    setActiveVisualMode('classic');
+    return;
+  }
+  if (activeVisualMode === 'classic') {
+    // Switch to the complete 3D mesh and its selected camera immediately.
+    // Lighting and focus are visual effects, so those alone ease in from zero.
+    renderedShadingStrength = 0;
+    renderedPerspectiveStrength = perspectiveStrength;
+    renderedZoomStrength = zoomStrength;
     renderedOpticsStrength = 0;
     setActiveVisualMode('hd2d');
   }
@@ -310,9 +324,9 @@ function beginVisualModeTransition(mode, now = visualModeTransitionNow()) {
     fromZoom: renderedZoomStrength,
     fromOptics: renderedOpticsStrength,
     toShading: mode === 'hd2d' ? shadingStrength : 0,
-    toPerspective: mode === 'hd2d' ? perspectiveStrength : 0,
-    toZoom: mode === 'hd2d' ? zoomStrength : 0,
-    toOptics: mode === 'hd2d' ? opticsStrength : 0,
+    toPerspective: perspectiveStrength,
+    toZoom: zoomStrength,
+    toOptics: opticsStrength,
   };
 }
 

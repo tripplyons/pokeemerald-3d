@@ -1,0 +1,12 @@
+# Verify that view topology switches immediately while lighting and focus ease.
+120 warp 26 14 39 40
+320 view classic animated
+320 screenshot classic-immediate
+320 probe state
+321 view hd2d animated
+321 screenshot hd2d-effects-zero
+321 probe state
+441 screenshot hd2d-effects-midpoint
+441 probe state
+561 screenshot hd2d-effects-settled
+561 probe state
