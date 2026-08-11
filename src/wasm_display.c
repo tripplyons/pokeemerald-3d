@@ -1310,45 +1310,70 @@ static u16 HdMetatileCoverage(const struct HdMapSample *sample, u8 plane)
     return coverage;
 }
 
-static bool8 HdMetatilesHaveSameArt(const struct HdMapSample *left,
-                                    const struct HdMapSample *right)
+static bool8 HdMetatilesHaveSameVisibleArt(const struct HdMapSample *left,
+                                           const struct HdMapSample *right)
 {
-    const struct Tileset *leftTileset;
-    const struct Tileset *rightTileset;
-    u16 leftMetatile;
-    u16 rightMetatile;
-    const u16 *leftEntries;
-    const u16 *rightEntries;
-
     if (!left->valid || !right->valid)
         return FALSE;
     if (left->metatileId >= NUM_METATILES_TOTAL
      || right->metatileId >= NUM_METATILES_TOTAL)
         return FALSE;
-    if ((left->metatileId < NUM_METATILES_IN_PRIMARY)
-     != (right->metatileId < NUM_METATILES_IN_PRIMARY))
-        return FALSE;
-    if (left->metatileId < NUM_METATILES_IN_PRIMARY)
+
+    for (u32 quadrant = 0; quadrant < 4; quadrant++)
     {
-        leftTileset = left->layout->primaryTileset;
-        rightTileset = right->layout->primaryTileset;
-        leftMetatile = left->metatileId;
-        rightMetatile = right->metatileId;
+        for (u32 y = 0; y < HD2D_TILE_WIDTH; y++)
+        {
+            for (u32 x = 0; x < HD2D_TILE_WIDTH; x++)
+            {
+                struct Rgb leftBottom;
+                struct Rgb leftTop;
+                struct Rgb rightBottom;
+                struct Rgb rightTop;
+                struct Rgb leftColor;
+                struct Rgb rightColor;
+                bool8 leftBottomOpaque;
+                bool8 rightBottomOpaque;
+                bool8 leftOpaque = FALSE;
+                bool8 rightOpaque = FALSE;
+
+                leftBottomOpaque = HdMetatilePixel(left->layout, left->metatileId, 0,
+                                                   quadrant, x, y, &leftBottom);
+                if (HdMetatilePixel(left->layout, left->metatileId, 1,
+                                    quadrant, x, y, &leftTop))
+                {
+                    leftOpaque = TRUE;
+                    leftColor = leftTop;
+                }
+                else if (leftBottomOpaque)
+                {
+                    leftOpaque = TRUE;
+                    leftColor = leftBottom;
+                }
+
+                rightBottomOpaque = HdMetatilePixel(right->layout, right->metatileId, 0,
+                                                    quadrant, x, y, &rightBottom);
+                if (HdMetatilePixel(right->layout, right->metatileId, 1,
+                                    quadrant, x, y, &rightTop))
+                {
+                    rightOpaque = TRUE;
+                    rightColor = rightTop;
+                }
+                else if (rightBottomOpaque)
+                {
+                    rightOpaque = TRUE;
+                    rightColor = rightBottom;
+                }
+
+                if (leftOpaque != rightOpaque)
+                    return FALSE;
+                if (leftOpaque
+                 && (leftColor.r != rightColor.r
+                  || leftColor.g != rightColor.g
+                  || leftColor.b != rightColor.b))
+                    return FALSE;
+            }
+        }
     }
-    else
-    {
-        leftTileset = left->layout->secondaryTileset;
-        rightTileset = right->layout->secondaryTileset;
-        leftMetatile = left->metatileId - NUM_METATILES_IN_PRIMARY;
-        rightMetatile = right->metatileId - NUM_METATILES_IN_PRIMARY;
-    }
-    if (leftTileset != rightTileset)
-        return FALSE;
-    leftEntries = leftTileset->metatiles + leftMetatile * NUM_TILES_PER_METATILE;
-    rightEntries = rightTileset->metatiles + rightMetatile * NUM_TILES_PER_METATILE;
-    for (u32 i = 0; i < NUM_TILES_PER_METATILE; i++)
-        if (leftEntries[i] != rightEntries[i])
-            return FALSE;
     return TRUE;
 }
 
@@ -1566,7 +1591,7 @@ static struct HdAdjacentSampleEvidence HdSampleAdjacentEvidence(u32 index,
             evidence.touchesReflection = TRUE;
         if (HdBehaviorIsWaterSurface(behavior))
         {
-            if (!HdMetatilesHaveSameArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
+            if (!HdMetatilesHaveSameVisibleArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
                 continue;
             evidence.matchingWaterArt = TRUE;
             if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
@@ -1574,7 +1599,7 @@ static struct HdAdjacentSampleEvidence HdSampleAdjacentEvidence(u32 index,
         }
         else if (HdBehaviorIsOpenDeck(behavior))
         {
-            if (!HdMetatilesHaveSameArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
+            if (!HdMetatilesHaveSameVisibleArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
                 continue;
             evidence.matchingOpenDeckArt = TRUE;
             if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
@@ -1582,7 +1607,7 @@ static struct HdAdjacentSampleEvidence HdSampleAdjacentEvidence(u32 index,
         }
         else if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
         {
-            if (!HdMetatilesHaveSameArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
+            if (!HdMetatilesHaveSameVisibleArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
                 continue;
             evidence.matchingWaterReceiverArt = TRUE;
         }
