@@ -1,10 +1,12 @@
 #if WASM
 
 #include "global.h"
+#include "constants/weather.h"
 #include "constants/map_types.h"
 #include "constants/metatile_behaviors.h"
 #include "gba/defines.h"
 #include "gba/io_reg.h"
+#include "field_weather.h"
 #include "main.h"
 #include "overworld.h"
 #include "field_camera.h"
@@ -1996,6 +1998,28 @@ u32 WasmDisplaySceneKind(void)
             return 0;
     }
     return 1;
+}
+
+// Keep automation weather changes on the same saved-weather translation path
+// as gameplay. WEATHER_ABNORMAL is a saved-weather marker rather than an
+// entry in sWeatherFuncs, so let DoCurrentWeather resolve it before the
+// no-delay setter is used for ordinary weather values.
+u32 WasmSetAutomationWeather(u32 weather)
+{
+    if (weather > WEATHER_ABNORMAL)
+        return FALSE;
+
+    if (weather == WEATHER_ABNORMAL)
+    {
+        SetSavedWeather(weather);
+        DoCurrentWeather();
+        return TRUE;
+    }
+
+    SetWeather(weather);
+    DoCurrentWeather();
+    SetCurrentAndNextWeatherNoDelay(GetSavedWeather());
+    return TRUE;
 }
 
 u8 *WasmWorldBuffer(void)

@@ -1618,7 +1618,7 @@ function automationObjectDescriptors() {
 function automationWeather(weather) {
   if (!Number.isInteger(weather) || weather < 0 || weather > 15)
     throw new Error(`invalid weather ${weather}`);
-  instance.exports.SetCurrentAndNextWeatherNoDelay(weather);
+  return instance.exports.WasmSetAutomationWeather(weather) !== 0;
 }
 
 function automationAvatar(mode) {

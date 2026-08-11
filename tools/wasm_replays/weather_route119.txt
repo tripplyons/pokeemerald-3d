@@ -1,0 +1,21 @@
+# Verify canonical weather translation after warping to Route 119.
+120 warp 0 34 29 13
+230 screenshot route119-clear
+240 weather 0
+260 weather 1
+280 weather 2
+300 weather 3
+320 weather 4
+340 weather 5
+360 weather 6
+380 weather 7
+400 weather 8
+420 weather 9
+440 weather 10
+460 weather 11
+480 weather 12
+500 weather 13
+520 weather 14
+540 weather 15
+600 screenshot route119-weather
+600 probe state

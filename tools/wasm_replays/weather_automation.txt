@@ -1,0 +1,19 @@
+# Exercise every weather value accepted by the automation API.
+# WEATHER_ABNORMAL (15) is resolved through the canonical abnormal-weather task.
+0 weather 0
+4 weather 1
+8 weather 2
+12 weather 3
+16 weather 4
+20 weather 5
+24 weather 6
+28 weather 7
+32 weather 8
+36 weather 9
+40 weather 10
+44 weather 11
+48 weather 12
+52 weather 13
+56 weather 14
+60 weather 15
+120 probe state
