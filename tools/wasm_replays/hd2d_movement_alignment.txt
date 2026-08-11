@@ -200,13 +200,22 @@
 6081 screenshot route120-fortree-edge-before
 6081 probe state
 6081 probe map-grid
+6081 probe hd2d-courses 32
+6081 probe world-atlas
+6081 probe height-map
 6082 button left on
 6091 screenshot route120-fortree-edge-during
 6091 probe state
+6091 probe hd2d-courses 32
+6091 probe world-atlas
+6091 probe height-map
 6178 button left off
 6278 screenshot route120-fortree-edge-after
 6278 probe state
 6278 probe object-events
+6278 probe hd2d-courses 32
+6278 probe world-atlas
+6278 probe height-map
 6279 warp 0 35 20 50
 6459 screenshot route120-tall-grass-ledge-before
 6459 probe state

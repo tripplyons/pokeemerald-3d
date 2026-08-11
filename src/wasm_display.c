@@ -38,6 +38,10 @@ extern void WasmApplyTilesetAnimations(const struct Tileset *tileset, u8 *dest, 
 #define HD2D_COURSE_COLS (HD2D_SAMPLE_COLS * 2)
 #define HD2D_COURSE_ROWS (HD2D_SAMPLE_ROWS * 2)
 #define HD2D_COURSE_COUNT (HD2D_COURSE_COLS * HD2D_COURSE_ROWS)
+#define HD2D_RECEIVER_VALID 0x8000
+#define HD2D_RECEIVER_OFFSET_BIAS 16
+#define HD2D_RECEIVER_DX_SHIFT 3
+#define HD2D_RECEIVER_DY_SHIFT 8
 #define HD2D_BUILDING_COUNT (HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS)
 #define HD2D_WORLD_OFFSET_X ((HD2D_WORLD_WIDTH - DISPLAY_WIDTH) / 2)
 #define HD2D_WORLD_OFFSET_Y ((HD2D_WORLD_HEIGHT - DISPLAY_HEIGHT) / 2)
@@ -61,6 +65,7 @@ enum HdSurface
     HD_SURFACE_OBSTACLE,
     HD_SURFACE_WALL,
     HD_SURFACE_ROOF,
+    HD_SURFACE_OPEN_DECK = 7,
 };
 
 #define LAYER_BG0 0x01
@@ -114,6 +119,7 @@ static u8 sWasmBgPriorityData[HD2D_WORLD_PIXELS];
 static s8 sWasmWorldHeightData[HD2D_WORLD_PIXELS];
 static s8 sWasmWorldGroundHeightData[HD2D_WORLD_PIXELS];
 static u16 sWasmWorldGeometryData[HD2D_WORLD_PIXELS];
+static u16 sWasmWorldReceiverData[HD2D_WORLD_PIXELS];
 static s32 sWasmWorldPixelOriginX;
 static s32 sWasmWorldPixelOriginY;
 static u8 sWasmObjectRgba[DISPLAY_PIXELS * RGBA_CHANNELS];
@@ -929,11 +935,21 @@ struct HdMapSample
     bool8 valid;
 };
 
+struct HdAdjacentSampleEvidence
+{
+    bool8 matchingWaterArt;
+    bool8 matchingOpenDeckArt;
+    bool8 matchingWaterReceiverArt;
+    bool8 touchesReflection;
+};
+
 static struct HdMapSample sHdMapSamples[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
 static u16 sHdMapAttributes[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
+static u8 sHdSampleBaseSurfaces[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
 static s8 sHdCourseHeights[HD2D_COURSE_COUNT];
 static s8 sHdCourseGroundHeights[HD2D_COURSE_COUNT];
 static u16 sHdCourseGeometry[HD2D_COURSE_COUNT];
+static u16 sHdCourseReceivers[HD2D_COURSE_COUNT];
 static s16 sHdCourseBuilding[HD2D_COURSE_COUNT];
 static u8 sHdCourseBuildingKind[HD2D_COURSE_COUNT];
 static u16 sHdCourseVisit[HD2D_COURSE_COUNT];
@@ -1294,6 +1310,48 @@ static u16 HdMetatileCoverage(const struct HdMapSample *sample, u8 plane)
     return coverage;
 }
 
+static bool8 HdMetatilesHaveSameArt(const struct HdMapSample *left,
+                                    const struct HdMapSample *right)
+{
+    const struct Tileset *leftTileset;
+    const struct Tileset *rightTileset;
+    u16 leftMetatile;
+    u16 rightMetatile;
+    const u16 *leftEntries;
+    const u16 *rightEntries;
+
+    if (!left->valid || !right->valid)
+        return FALSE;
+    if (left->metatileId >= NUM_METATILES_TOTAL
+     || right->metatileId >= NUM_METATILES_TOTAL)
+        return FALSE;
+    if ((left->metatileId < NUM_METATILES_IN_PRIMARY)
+     != (right->metatileId < NUM_METATILES_IN_PRIMARY))
+        return FALSE;
+    if (left->metatileId < NUM_METATILES_IN_PRIMARY)
+    {
+        leftTileset = left->layout->primaryTileset;
+        rightTileset = right->layout->primaryTileset;
+        leftMetatile = left->metatileId;
+        rightMetatile = right->metatileId;
+    }
+    else
+    {
+        leftTileset = left->layout->secondaryTileset;
+        rightTileset = right->layout->secondaryTileset;
+        leftMetatile = left->metatileId - NUM_METATILES_IN_PRIMARY;
+        rightMetatile = right->metatileId - NUM_METATILES_IN_PRIMARY;
+    }
+    if (leftTileset != rightTileset)
+        return FALSE;
+    leftEntries = leftTileset->metatiles + leftMetatile * NUM_TILES_PER_METATILE;
+    rightEntries = rightTileset->metatiles + rightMetatile * NUM_TILES_PER_METATILE;
+    for (u32 i = 0; i < NUM_TILES_PER_METATILE; i++)
+        if (leftEntries[i] != rightEntries[i])
+            return FALSE;
+    return TRUE;
+}
+
 static bool8 HdMapSampleIsDoorCourse(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
@@ -1463,8 +1521,77 @@ static bool8 HdMapSampleIsTerrainCourse(u32 index, u32 sampleX, u32 sampleY,
     return FALSE;
 }
 
+static bool8 HdBehaviorIsOpenDeck(u8 behavior)
+{
+    if (MetatileBehavior_IsFortreeBridge(behavior)
+     || MetatileBehavior_IsPacifidlogLog(behavior))
+        return TRUE;
+    if (MetatileBehavior_IsBridgeOverWater(behavior)
+     && MetatileBehavior_GetBridgeType(behavior) != BRIDGE_TYPE_OCEAN)
+        return TRUE;
+    return FALSE;
+}
+
+static bool8 HdBehaviorIsWaterSurface(u8 behavior)
+{
+    return behavior == MB_REFLECTION_UNDER_BRIDGE
+        || (MetatileBehavior_IsSurfableWaterOrUnderwater(behavior)
+         && !MetatileBehavior_IsWaterfall(behavior));
+}
+
+static bool8 HdBehaviorOpenDeckUsesWaterReceiver(u8 behavior);
+
+static struct HdAdjacentSampleEvidence HdSampleAdjacentEvidence(u32 index,
+                                                               u32 sampleX,
+                                                               u32 sampleY,
+                                                               u32 sampleCols,
+                                                               u32 sampleRows)
+{
+    static const s8 offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    struct HdAdjacentSampleEvidence evidence = {0};
+
+    for (u32 i = 0; i < ARRAY_COUNT(offsets); i++)
+    {
+        const s32 neighborX = (s32)sampleX + offsets[i][0];
+        const s32 neighborY = (s32)sampleY + offsets[i][1];
+        u32 neighbor;
+        u8 behavior;
+
+        if (neighborX < 0 || neighborY < 0
+         || neighborX >= (s32)sampleCols || neighborY >= (s32)sampleRows)
+            continue;
+        neighbor = neighborY * sampleCols + neighborX;
+        behavior = UNPACK_BEHAVIOR(sHdMapAttributes[neighbor]);
+        if (behavior == MB_REFLECTION_UNDER_BRIDGE)
+            evidence.touchesReflection = TRUE;
+        if (HdBehaviorIsWaterSurface(behavior))
+        {
+            if (!HdMetatilesHaveSameArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
+                continue;
+            evidence.matchingWaterArt = TRUE;
+            if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
+                evidence.matchingWaterReceiverArt = TRUE;
+        }
+        else if (HdBehaviorIsOpenDeck(behavior))
+        {
+            if (!HdMetatilesHaveSameArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
+                continue;
+            evidence.matchingOpenDeckArt = TRUE;
+            if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
+                evidence.matchingWaterReceiverArt = TRUE;
+        }
+        else if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
+        {
+            if (!HdMetatilesHaveSameArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
+                continue;
+            evidence.matchingWaterReceiverArt = TRUE;
+        }
+    }
+    return evidence;
+}
+
 static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
-                                 u32 sampleCols)
+                                 u32 sampleCols, u32 sampleRows)
 {
     const struct HdMapSample *sample = &sHdMapSamples[index];
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
@@ -1472,14 +1599,31 @@ static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
     if (gMapHeader.mapType == MAP_TYPE_INDOOR
      || gMapHeader.mapType == MAP_TYPE_SECRET_BASE)
         return HD_SURFACE_GROUND;
-    if (MetatileBehavior_IsBridgeOverWater(behavior)
-     || MetatileBehavior_IsFortreeBridge(behavior)
-     || MetatileBehavior_IsPacifidlogLog(behavior)
-     || behavior == MB_REFLECTION_UNDER_BRIDGE)
-        return HD_SURFACE_DECK;
-    if (MetatileBehavior_IsSurfableWaterOrUnderwater(behavior)
-     && !MetatileBehavior_IsWaterfall(behavior))
+    if (HdBehaviorIsWaterSurface(behavior))
         return HD_SURFACE_WATER;
+    if (HdBehaviorIsOpenDeck(behavior))
+    {
+        const struct HdAdjacentSampleEvidence evidence =
+            HdSampleAdjacentEvidence(index, sampleX, sampleY, sampleCols, sampleRows);
+
+        if (evidence.matchingWaterArt)
+            return HD_SURFACE_WATER;
+        return HD_SURFACE_OPEN_DECK;
+    }
+    if (MetatileBehavior_IsBridgeOverWater(behavior))
+        return HD_SURFACE_DECK;
+    if (behavior == MB_NORMAL)
+    {
+        const struct HdAdjacentSampleEvidence evidence =
+            HdSampleAdjacentEvidence(index, sampleX, sampleY, sampleCols, sampleRows);
+
+        if (evidence.matchingOpenDeckArt)
+            return HD_SURFACE_OPEN_DECK;
+        if (sample->collision
+         && HdMetatileCoverage(sample, 1) != 0
+         && evidence.touchesReflection)
+            return HD_SURFACE_OPEN_DECK;
+    }
     if (HdMapSampleIsTerrainCourse(index, sampleX, sampleY, sampleCols))
         return HD_SURFACE_TERRAIN;
     // Only cells with top-plane art obstruct. Bottom-plane-only collision
@@ -1499,6 +1643,7 @@ static s8 HdSurfaceBaseHeight(u8 surface)
     case HD_SURFACE_WATER:
         return -4;
     case HD_SURFACE_DECK:
+    case HD_SURFACE_OPEN_DECK:
         return 4;
     case HD_SURFACE_TERRAIN:
         return 24;
@@ -1506,6 +1651,106 @@ static s8 HdSurfaceBaseHeight(u8 surface)
         return 4;
     default:
         return 0;
+    }
+}
+
+static u16 HdPackOpenDeckReceiver(u8 surface, s32 dx, s32 dy)
+{
+    return HD2D_RECEIVER_VALID
+        | (surface & 7)
+        | ((dx + HD2D_RECEIVER_OFFSET_BIAS) << HD2D_RECEIVER_DX_SHIFT)
+        | ((dy + HD2D_RECEIVER_OFFSET_BIAS) << HD2D_RECEIVER_DY_SHIFT);
+}
+
+static bool8 HdBehaviorOpenDeckUsesWaterReceiver(u8 behavior)
+{
+    if (MetatileBehavior_IsFortreeBridge(behavior))
+        return FALSE;
+    if (MetatileBehavior_IsPacifidlogLog(behavior)
+     || behavior == MB_REFLECTION_UNDER_BRIDGE)
+        return TRUE;
+    if (MetatileBehavior_IsBridgeOverWater(behavior)
+     && MetatileBehavior_GetBridgeType(behavior) != BRIDGE_TYPE_OCEAN)
+        return TRUE;
+    return FALSE;
+}
+
+static bool8 HdSampleOpenDeckUsesWaterReceiver(u32 sampleX, u32 sampleY,
+                                               u32 sampleCols, u32 sampleRows)
+{
+    const u32 sample = sampleY * sampleCols + sampleX;
+    const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[sample]);
+    const struct HdAdjacentSampleEvidence evidence =
+        HdSampleAdjacentEvidence(sample, sampleX, sampleY, sampleCols, sampleRows);
+
+    if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
+        return TRUE;
+    if (MetatileBehavior_IsFortreeBridge(behavior))
+        return FALSE;
+    return evidence.matchingWaterReceiverArt;
+}
+
+static bool8 HdOpenDeckReceiverSurfaceMatches(u8 surface, bool8 useWaterReceiver)
+{
+    if (useWaterReceiver)
+        return surface == HD_SURFACE_WATER;
+    return surface != HD_SURFACE_OPEN_DECK
+        && surface != HD_SURFACE_WATER
+        && surface != HD_SURFACE_WALL
+        && surface != HD_SURFACE_ROOF;
+}
+
+static void HdResolveOpenDeckReceivers(u32 courseCols, u32 courseRows)
+{
+    const u32 sampleCols = courseCols / 2;
+    const u32 sampleRows = courseRows / 2;
+
+    for (u32 courseY = 0; courseY < courseRows; courseY++)
+    {
+        for (u32 courseX = 0; courseX < courseCols; courseX++)
+        {
+            const u32 course = courseY * courseCols + courseX;
+            bool8 useWaterReceiver;
+
+            sHdCourseReceivers[course] = 0;
+            if ((sHdCourseGeometry[course] & 7) != HD_SURFACE_OPEN_DECK)
+                continue;
+            useWaterReceiver = HdSampleOpenDeckUsesWaterReceiver(courseX / 2,
+                                                                 courseY / 2,
+                                                                 sampleCols,
+                                                                 sampleRows);
+            for (u32 radius = 1; radius <= HD2D_GEOMETRY_RADIUS; radius++)
+            {
+                for (s32 dy = -(s32)radius; dy <= (s32)radius; dy++)
+                {
+                    const s32 dxLimit = radius - (dy < 0 ? -dy : dy);
+                    const s32 dxs[2] = {-dxLimit, dxLimit};
+
+                    for (u32 i = 0; i < ARRAY_COUNT(dxs); i++)
+                    {
+                        const s32 dx = dxs[i];
+                        const s32 sourceX = (s32)courseX + dx;
+                        const s32 sourceY = (s32)courseY + dy;
+                        u32 source;
+
+                        if (sourceX < 0 || sourceY < 0
+                         || sourceX >= (s32)courseCols || sourceY >= (s32)courseRows)
+                            continue;
+                        source = sourceY * courseCols + sourceX;
+                        if (HdOpenDeckReceiverSurfaceMatches(sHdCourseGeometry[source] & 7,
+                                                             useWaterReceiver)
+                         && sHdCourseHeights[source] < sHdCourseHeights[course])
+                        {
+                            sHdCourseReceivers[course] = HdPackOpenDeckReceiver(sHdCourseGeometry[source] & 7,
+                                                                                dx, dy);
+                            goto nextCourse;
+                        }
+                    }
+                }
+            }
+        nextCourse:
+            ;
+        }
     }
 }
 
@@ -1900,9 +2145,19 @@ static void RenderHd2dWorld(u16 dispcnt)
                                                            sHdMapSamples[index].metatileId);
         }
     }
+    for (u32 sampleY = 0; sampleY < sampleRows; sampleY++)
+    {
+        for (u32 sampleX = 0; sampleX < sampleCols; sampleX++)
+        {
+            const u32 sample = sampleY * sampleCols + sampleX;
+
+            sHdSampleBaseSurfaces[sample] = HdMapSampleBaseSurface(sample, sampleX, sampleY,
+                                                                   sampleCols, sampleRows);
+        }
+    }
     // Resolve the visual and receiver contracts on independent 8x8 authored
-    // courses. A metatile plane (bottom/top BG data) is never treated as its
-    // north/south course; only local source coordinates select the course.
+    // courses. Base surface semantics are sample-level; local source
+    // coordinates select the 8x8 authored course within each metatile.
     {
         const u32 courseCols = sampleCols * 2;
         const u32 courseRows = sampleRows * 2;
@@ -1915,18 +2170,19 @@ static void RenderHd2dWorld(u16 dispcnt)
                 const u32 sampleX = courseX / 2;
                 const u32 sampleY = courseY / 2;
                 const u32 sample = sampleY * sampleCols + sampleX;
-                const u8 surface = HdMapSampleBaseSurface(sample, sampleX, sampleY,
-                                                          sampleCols);
+                const u8 surface = sHdSampleBaseSurfaces[sample];
                 const s8 height = HdSurfaceBaseHeight(surface);
 
                 sHdCourseGeometry[course] = surface;
                 sHdCourseHeights[course] = height;
                 sHdCourseGroundHeights[course] = height;
+                sHdCourseReceivers[course] = 0;
                 sHdCourseBuilding[course] = -1;
                 sHdCourseBuildingKind[course] = 0;
                 sHdCourseVisit[course] = 0;
             }
         }
+        HdResolveOpenDeckReceivers(courseCols, courseRows);
         HdClassifyBuildingComponents(sampleCols, sampleRows,
                                      renderMinMapX - minMapX, renderMinMapY - minMapY,
                                      renderMaxMapX - minMapX + 1, renderMaxMapY - minMapY + 1);
@@ -1971,6 +2227,7 @@ static void RenderHd2dWorld(u16 dispcnt)
             sWasmWorldHeightData[pixel] = sHdCourseHeights[courseIndex];
             sWasmWorldGroundHeightData[pixel] = sHdCourseGroundHeights[courseIndex];
             sWasmWorldGeometryData[pixel] = sHdCourseGeometry[courseIndex];
+            sWasmWorldReceiverData[pixel] = sHdCourseReceivers[courseIndex];
         }
     }
 }
@@ -2193,6 +2450,16 @@ u16 *WasmWorldGeometryBuffer(void)
 u32 WasmWorldGeometryBufferSize(void)
 {
     return sizeof(sWasmWorldGeometryData);
+}
+
+u16 *WasmWorldReceiverBuffer(void)
+{
+    return sWasmWorldReceiverData;
+}
+
+u32 WasmWorldReceiverBufferSize(void)
+{
+    return sizeof(sWasmWorldReceiverData);
 }
 
 u8 *WasmDisplayLayerBuffer(void)

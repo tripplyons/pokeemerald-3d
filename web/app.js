@@ -138,6 +138,7 @@ let worldPixels;
 let worldHeightPixels;
 let worldGroundHeightPixels;
 let worldGeometryPixels;
+let worldReceiverPixels;
 let layerPixels;
 let objectIds;
 let bgPriorities;
@@ -925,6 +926,11 @@ function refreshFrameImage() {
     instance.exports.WasmWorldGeometryBuffer(),
     instance.exports.WasmWorldGeometryBufferSize() / 2,
   );
+  worldReceiverPixels = new Uint16Array(
+    memory.buffer,
+    instance.exports.WasmWorldReceiverBuffer(),
+    instance.exports.WasmWorldReceiverBufferSize() / 2,
+  );
   layerPixels = new Uint8Array(
     memory.buffer,
     instance.exports.WasmDisplayLayerBuffer(),
@@ -986,6 +992,7 @@ function render() {
     worldHeightPixels,
     worldGroundHeightPixels,
     worldGeometryPixels,
+    worldReceiverPixels,
     worldGridOffsetX: instance.exports.WasmWorldGridOffsetX(),
     worldGridOffsetY: instance.exports.WasmWorldGridOffsetY(),
     worldPixelOriginX: instance.exports.WasmWorldPixelOriginX(),
@@ -1701,6 +1708,7 @@ function automationHd2dCourses(radius = 12) {
   const heights = new Int8Array(memory.buffer, instance.exports.WasmWorldHeightBuffer(), instance.exports.WasmWorldHeightBufferSize());
   const grounds = new Int8Array(memory.buffer, instance.exports.WasmWorldGroundHeightBuffer(), instance.exports.WasmWorldGroundHeightBufferSize());
   const geometry = new Uint16Array(memory.buffer, instance.exports.WasmWorldGeometryBuffer(), instance.exports.WasmWorldGeometryBufferSize() / 2);
+  const receivers = new Uint16Array(memory.buffer, instance.exports.WasmWorldReceiverBuffer(), instance.exports.WasmWorldReceiverBufferSize() / 2);
   const cx = Math.floor(worldWidth / 2);
   const cy = Math.floor(worldHeight / 2);
   const gridOffsetX = instance.exports.WasmWorldGridOffsetX();
@@ -1729,6 +1737,7 @@ function automationHd2dCourses(radius = 12) {
         h: heights[i],
         g: grounds[i],
         geo: geometry[i],
+        receiver: receivers[i],
       });
     }
     rows.push(row);
@@ -1770,6 +1779,7 @@ function automationHeightMap() {
     else if (surface === 2) { red = 255; green = value * 0.4; blue = value * 0.4; }
     else if (surface === 3) { red = value * 0.3; green = 255; blue = value * 0.3; }
     else if (surface === 4) { red = 255; green = 255; blue = value * 0.3; }
+    else if (surface === 7) { red = value * 0.8; green = 255; blue = value * 0.6; }
     pixels[i * 4] = red;
     pixels[i * 4 + 1] = green;
     pixels[i * 4 + 2] = blue;

@@ -593,7 +593,7 @@ class WebGpuPresenter {
     this.tileHeights = new Float32Array(terrainTileCapacity);
     this.tileGroundHeights = new Float32Array(terrainTileCapacity);
     this.tileGeometry = new Uint16Array(terrainTileCapacity);
-    this.buildingComponents = [];
+    this.tileReceivers = new Uint16Array(terrainTileCapacity);
     this.terrainCols = 0;
     this.terrainRows = 0;
     this.terrainOriginX = 0;
@@ -871,7 +871,7 @@ class WebGpuPresenter {
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
   }
 
-  buildTerrain(worldHeights, worldGroundHeights, worldGeometry, worldPixels,
+  buildTerrain(worldHeights, worldGroundHeights, worldGeometry, worldReceivers, worldPixels,
                gridOffsetX, gridOffsetY) {
     const originX = gridOffsetX - TILE_SIZE;
     const originY = gridOffsetY - TILE_SIZE;
@@ -887,6 +887,7 @@ class WebGpuPresenter {
     const heights = this.tileHeights;
     const groundHeights = this.tileGroundHeights;
     const geometry = this.tileGeometry;
+    const receivers = this.tileReceivers;
     let signature = 2166136261;
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
@@ -897,15 +898,19 @@ class WebGpuPresenter {
         const height = worldHeights[source];
         const groundHeight = worldGroundHeights[source];
         const geometryWord = worldGeometry[source];
+        const receiverWord = worldReceivers[source];
         if (unchanged && (heights[tile] !== height
-            || groundHeights[tile] !== groundHeight || geometry[tile] !== geometryWord))
+            || groundHeights[tile] !== groundHeight || geometry[tile] !== geometryWord
+            || receivers[tile] !== receiverWord))
           unchanged = false;
         heights[tile] = height;
         groundHeights[tile] = groundHeight;
         geometry[tile] = geometryWord;
+        receivers[tile] = receiverWord;
         signature = Math.imul(signature ^ (height & 0xff), 16777619);
         signature = Math.imul(signature ^ (groundHeight & 0xff), 16777619);
         signature = Math.imul(signature ^ geometryWord, 16777619);
+        signature = Math.imul(signature ^ receiverWord, 16777619);
       }
     }
     signature >>>= 0;
@@ -927,6 +932,7 @@ class WebGpuPresenter {
     const inGrid = (x, y) => x >= 0 && y >= 0 && x < cols && y < rows;
     const heightAt = (x, y) => inGrid(x, y) ? heights[y * cols + x] : 0;
     const geometryAt = (x, y) => inGrid(x, y) ? geometry[y * cols + x] : 0;
+    const receiverAt = (x, y) => inGrid(x, y) ? receivers[y * cols + x] : 0;
     const surfaceAt = (x, y) => geometryAt(x, y) & 7;
     const componentAt = (x, y) => geometryAt(x, y) >> 3;
     const worldX = (x) => originX + x * TILE_SIZE - halfW;
@@ -937,7 +943,24 @@ class WebGpuPresenter {
     const pixelV = (pixel) => (Math.max(0, Math.min(this.worldHeight - 1, pixel)) + 0.5) / this.worldHeight;
     const SURFACE_WALL = 5;
     const SURFACE_ROOF = 6;
+    const SURFACE_WATER = 1;
+    const SURFACE_OPEN_DECK = 7;
     const MATERIAL_NEUTRAL_BUILDING = 8;
+    const RECEIVER_VALID = 0x8000;
+    const RECEIVER_SURFACE_MASK = 7;
+    const RECEIVER_OFFSET_MASK = 31;
+    const RECEIVER_OFFSET_BIAS = 16;
+    const RECEIVER_DX_SHIFT = 3;
+    const RECEIVER_DY_SHIFT = 8;
+
+    const openDeckReceiver = (tx, ty) => {
+      const word = receiverAt(tx, ty);
+      if ((word & RECEIVER_VALID) === 0) return null;
+      const sourceX = tx + (((word >> RECEIVER_DX_SHIFT) & RECEIVER_OFFSET_MASK) - RECEIVER_OFFSET_BIAS);
+      const sourceY = ty + (((word >> RECEIVER_DY_SHIFT) & RECEIVER_OFFSET_MASK) - RECEIVER_OFFSET_BIAS);
+      if (!inGrid(sourceX, sourceY)) return null;
+      return [sourceX, sourceY, heightAt(sourceX, sourceY), word & RECEIVER_SURFACE_MASK];
+    };
 
     // A vertical face is an extrusion of the authored lower surface beside an
     // edge, not a repetition of the elevated top tile. Each physical course
@@ -1040,6 +1063,22 @@ class WebGpuPresenter {
             visited[(ty + y) * cols + tx + x] = 1;
         }
         const shell = surfaceAt(tx, ty) === SURFACE_ROOF && componentAt(tx, ty) !== 0;
+        if (surfaceAt(tx, ty) === SURFACE_OPEN_DECK) {
+          for (let y = 0; y < depth; y++) {
+            for (let x = 0; x < width; x++) {
+              const source = openDeckReceiver(tx + x, ty + y);
+              if (!source) continue;
+              const [sourceX, sourceY, receiverHeight, receiverSurface] = source;
+              quad(
+                [worldX(tx + x), receiverHeight, worldZ(ty + y), textureU(sourceX), textureV(sourceY)],
+                [worldX(tx + x + 1), receiverHeight, worldZ(ty + y), textureU(sourceX + 1), textureV(sourceY)],
+                [worldX(tx + x + 1), receiverHeight, worldZ(ty + y + 1), textureU(sourceX + 1), textureV(sourceY + 1)],
+                [worldX(tx + x), receiverHeight, worldZ(ty + y + 1), textureU(sourceX), textureV(sourceY + 1)],
+                [0, 1, 0], receiverSurface,
+              );
+            }
+          }
+        }
         quad(
           [worldX(tx), height, worldZ(ty), textureU(tx), textureV(ty)],
           [worldX(tx + width), height, worldZ(ty), textureU(tx + width), textureV(ty)],
@@ -1067,12 +1106,6 @@ class WebGpuPresenter {
             roofCells: [],
             wallCells: [],
             wallRects: [],
-            x0: Infinity,
-            x1: -Infinity,
-            minZ: Infinity,
-            maxZ: -Infinity,
-            occlusionZ: -Infinity,
-            frontZ: -Infinity,
           };
           components.set(id, component);
         }
@@ -1080,10 +1113,6 @@ class WebGpuPresenter {
         if (surfaceAt(tx, ty) === SURFACE_ROOF) {
           component.roofHeight = Math.max(component.roofHeight, heightAt(tx, ty));
           component.roofCells.push([tx, ty]);
-          component.x0 = Math.min(component.x0, worldX(tx));
-          component.x1 = Math.max(component.x1, worldX(tx + 1));
-          component.minZ = Math.min(component.minZ, worldZ(ty));
-          component.maxZ = Math.max(component.maxZ, worldZ(ty + 1));
         }
       }
     }
@@ -1139,23 +1168,14 @@ class WebGpuPresenter {
           [x0, top, z, textureU(tx), vTop],
           [0, 0, 1], SURFACE_WALL, 1, component.base,
         );
-        component.x0 = Math.min(component.x0, x0);
-        component.x1 = Math.max(component.x1, x1);
-        component.minZ = Math.min(component.minZ, worldZ(ty));
-        component.maxZ = Math.max(component.maxZ, z);
-        component.occlusionZ = Math.max(component.occlusionZ, worldZ(ty));
-        component.frontZ = Math.max(component.frontZ, z);
         component.roofHeight = Math.max(component.roofHeight, top);
         component.wallRects.push([tx, ty, width, depth, top]);
         for (let y = 0; y < depth; y++) {
           for (let x = 0; x < width; x++)
-            component.wallCells.push([tx + x, ty + y, top, ty - 1]);
+            component.wallCells.push([tx + x, ty + y, top]);
         }
       }
     }
-    this.buildingComponents = Array.from(components.values()).filter((component) =>
-      Number.isFinite(component.x0) && Number.isFinite(component.x1)
-        && Number.isFinite(component.minZ) && Number.isFinite(component.frontZ));
 
     // Build a neutral structural color from pixels recurring across the
     // component's authored tiles. One-off markings cannot enter the generated
@@ -1317,12 +1337,15 @@ class WebGpuPresenter {
       }
     }
 
-    // Preserve the existing atlas-edge extrusion for non-building materials.
+    // Preserve atlas-edge extrusion for solid non-building materials. Open
+    // bridge decks use the lower receiver generated above, not a vertical
+    // curtain sampled from water or bridge pixels.
     const ordinaryEdge = (tx, ty, dx, dy) => {
       const surface = surfaceAt(tx, ty);
       const height = heightAt(tx, ty);
       const bottom = heightAt(tx + dx, ty + dy);
-      return surface !== SURFACE_ROOF && surface !== SURFACE_WALL && bottom < height
+      return surface !== SURFACE_ROOF && surface !== SURFACE_WALL
+        && surface !== SURFACE_OPEN_DECK && bottom < height
         ? { height, bottom } : null;
     };
     for (const dy of [-1, 1]) {
@@ -1627,13 +1650,13 @@ class WebGpuPresenter {
     );
   }
 
-  present({ finalPixels, worldPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom, optics }) {
+  present({ finalPixels, worldPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldReceiverPixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom, optics }) {
     const encoder = this.device.createCommandEncoder({ label: 'pokeemerald frame encoder' });
     let presentBindGroup = this.finalBindGroup;
     if (enhanced) {
       this.writeTexture(this.worldTexture, worldPixels, this.worldWidth, this.worldHeight);
       const vertexCount = this.buildTerrain(
-        worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldPixels,
+        worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldReceiverPixels, worldPixels,
         worldGridOffsetX, worldGridOffsetY,
       );
       const billboardVertexCount = this.buildFrameLayers(

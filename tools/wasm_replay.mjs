@@ -118,10 +118,13 @@ function parseEvents(text) {
     }
 
     if (fields[1] === 'probe') {
-      if (fields.length !== 3 || !['hblank-dma-win0h', 'trainer-id-nonzero', 'renderer-fps', 'object-descriptors', 'object-events', 'state', 'map-grid', 'hd2d-courses', 'world-atlas', 'height-map'].includes(fields[2])) {
-        throw new Error(`${index + 1}: expected "<frame> probe <hblank-dma-win0h|trainer-id-nonzero|renderer-fps|object-descriptors|object-events|state|map-grid|hd2d-courses|world-atlas|height-map>"`);
+      if ((fields.length !== 3 && fields.length !== 4) || !['hblank-dma-win0h', 'trainer-id-nonzero', 'renderer-fps', 'object-descriptors', 'object-events', 'state', 'map-grid', 'hd2d-courses', 'world-atlas', 'height-map'].includes(fields[2])) {
+        throw new Error(`${index + 1}: expected "<frame> probe <hblank-dma-win0h|trainer-id-nonzero|renderer-fps|object-descriptors|object-events|state|map-grid|hd2d-courses|world-atlas|height-map> [radius]"`);
       }
-      events.push({ frame, type: 'probe', name: fields[2] });
+      const radius = fields.length === 4 ? Number(fields[3]) : null;
+      if (radius !== null && (fields[2] !== 'hd2d-courses' || !Number.isInteger(radius) || radius < 1 || radius > 32))
+        throw new Error(`${index + 1}: only hd2d-courses accepts an integer radius from 1 to 32`);
+      events.push({ frame, type: 'probe', name: fields[2], radius });
       continue;
     }
 
@@ -296,7 +299,8 @@ async function runProbe(cdp, event, outputDir) {
     return { frame: event.frame, name: event.name, result };
   }
   if (event.name === 'hd2d-courses') {
-    const result = await evaluate(cdp, `window.pokeemerald.automation.hd2dCourses()`);
+    const argument = event.radius === null ? '' : String(event.radius);
+    const result = await evaluate(cdp, `window.pokeemerald.automation.hd2dCourses(${argument})`);
     return { frame: event.frame, name: event.name, result };
   }
   if (event.name === 'world-atlas' || event.name === 'height-map') {
