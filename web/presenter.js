@@ -1605,8 +1605,10 @@ class WebGpuPresenter {
       });
       billboardPass.setPipeline(this.billboardPipeline); billboardPass.setBindGroup(0, this.billboardBindGroup); billboardPass.setVertexBuffer(0, this.billboardVertexBuffer); billboardPass.draw(billboardVertexCounts.normal); billboardPass.end();
 
+      // Apply shared focus-depth optics to the complete world scene so actors
+      // integrate with terrain instead of appearing pasted over the diorama.
       const cinematicPass = encoder.beginRenderPass({
-        label: 'cinematic HD-2D post-process',
+        label: 'cinematic HD-2D scene post-process',
         colorAttachments: [{ view: this.gradedTexture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
       });
       cinematicPass.setPipeline(this.cinematicPipeline); cinematicPass.setBindGroup(0, this.cinematicBindGroup); cinematicPass.draw(3); cinematicPass.end();
