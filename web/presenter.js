@@ -53,10 +53,6 @@ fn highlight(color: vec3f) -> vec3f {
   return color * energy;
 }
 
-fn screenHash(point: vec2f) -> f32 {
-  return fract(sin(dot(point, vec2f(12.9898, 78.233))) * 43758.5453);
-}
-
 struct FocusSamples {
   color: vec3f,
   bloom: vec3f,
@@ -125,22 +121,11 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let optical = color;
   color += bloom * 0.23;
 
-  // Filmic contrast and split toning tie the originally independent terrain
-  // and upright sprites into one scene: cool ambient shadows, warm highlights.
-  let originalLuma = luminance(color);
-  color = mix(vec3f(originalLuma), color, 1.14);
-  color = (color - vec3f(0.5)) * 1.105 + vec3f(0.5);
-  let tonalPosition = smoothstep(0.12, 0.88, originalLuma);
-  color *= mix(vec3f(0.975, 0.998, 1.035), vec3f(1.030, 1.010, 0.970), tonalPosition);
-
-  // Soft optical falloff and a restrained upper-left key glow produce the
-  // dramatic miniature-diorama framing without touching the flat UI pass.
+  // Soft optical falloff retains the miniature-diorama framing. No grading,
+  // split tone, screen grain, or glow stacks on the world-space neutral key.
   let vignetteShape = dot(centered * vec2f(0.82, 1.03), centered * vec2f(0.82, 1.03));
   let vignette = smoothstep(0.30, 1.08, vignetteShape);
-  let keyGlow = pow(max(0.0, 1.0 - length((uv - vec2f(0.16, 0.08)) * vec2f(1.0, 1.25))), 3.0);
   color *= 1.0 - 0.31 * vignette;
-  color += vec3f(1.0, 0.76, 0.48) * (0.045 * keyGlow);
-  color += vec3f(screenHash(vec2f(pixel)) - 0.5) * 0.006;
 
   let lit = mix(optical, clamp(color, vec3f(0.0), vec3f(1.0)), camera.values.z);
   return vec4f(clamp(lit, vec3f(0.0), vec3f(1.0)), 1.0);
@@ -152,23 +137,28 @@ struct Camera {
   values: vec4f,
   viewport: vec4f,
   world: vec4f,
+  lightTransform: mat4x4f,
 }
 struct VertexInput {
   @location(0) position: vec3f,
   @location(1) uv: vec2f,
-  @location(2) shade: f32,
-  @location(3) shell: vec2f,
+  @location(2) normal: vec3f,
+  @location(3) material: f32,
+  @location(4) shell: vec2f,
 }
 struct VertexOutput {
   @builtin(position) position: vec4f,
   @location(0) uv: vec2f,
-  @location(1) shade: f32,
-  @location(2) fog: f32,
-  @location(3) cameraDepth: f32,
+  @location(1) normal: vec3f,
+  @location(2) @interpolate(flat) material: u32,
+  @location(3) shadowPosition: vec3f,
+  @location(4) cameraDepth: f32,
 }
 @group(0) @binding(0) var worldTexture: texture_2d<f32>;
 @group(0) @binding(1) var pixelSampler: sampler;
 @group(0) @binding(2) var<uniform> camera: Camera;
+@group(0) @binding(3) var structuralShadowMap: texture_depth_2d;
+@group(0) @binding(4) var structuralShadowSampler: sampler_comparison;
 
 @vertex
 fn vertexMain(input: VertexInput) -> VertexOutput {
@@ -197,39 +187,40 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     depth,
   );
   output.uv = input.uv;
-  output.shade = input.shade;
-  output.fog = clamp((depth - cameraHeight + 100.0) / 260.0, 0.0, 1.0);
+  output.normal = input.normal;
+  output.material = u32(input.material);
+  let lightClip = camera.lightTransform * vec4f(input.position, 1.0);
+  output.shadowPosition = vec3f(
+    lightClip.x * 0.5 + 0.5,
+    0.5 - lightClip.y * 0.5,
+    lightClip.z,
+  );
   output.cameraDepth = depth;
   return output;
 }
 
-fn luminance(color: vec3f) -> f32 {
-  return dot(color, vec3f(0.2126, 0.7152, 0.0722));
-}
+const TO_KEY = normalize(vec3f(-0.45, 0.77, -0.45));
+const SURFACE_WATER = 1u;
 
-fn hash12(point: vec2f) -> f32 {
-  var p = fract(vec3f(point.x, point.y, point.x) * 0.1031);
-  p += dot(p, p.yzx + vec3f(33.33));
-  return fract((p.x + p.y) * p.z);
-}
-
-fn valueNoise(point: vec2f) -> f32 {
-  let cell = floor(point);
-  let local = fract(point);
-  let blend = local * local * (vec2f(3.0) - 2.0 * local);
-  let north = mix(hash12(cell), hash12(cell + vec2f(1.0, 0.0)), blend.x);
-  let south = mix(hash12(cell + vec2f(0.0, 1.0)), hash12(cell + vec2f(1.0)), blend.x);
-  return mix(north, south, blend.y);
-}
-
-fn naturalNoise(point: vec2f) -> f32 {
-  return valueNoise(point * 0.018)
-    + 0.50 * valueNoise(point * 0.041 + vec2f(17.0, 29.0))
-    + 0.25 * valueNoise(point * 0.089 + vec2f(47.0, 11.0));
-}
-
-fn loadWorld(pixel: vec2i, size: vec2i) -> vec3f {
-  return textureLoad(worldTexture, clamp(pixel, vec2i(0), size - 1), 0).rgb;
+fn structuralVisibility(position: vec3f, normal: vec3f) -> f32 {
+  if (any(position.xy <= vec2f(0.001)) || any(position.xy >= vec2f(0.999))
+      || position.z <= 0.0 || position.z >= 1.0) {
+    return 1.0;
+  }
+  let texel = 1.0 / vec2f(textureDimensions(structuralShadowMap));
+  let slope = 1.0 - max(dot(normal, TO_KEY), 0.0);
+  let reference = position.z - (0.00045 + 0.00115 * slope);
+  var visibility = 0.0;
+  for (var y = -1; y <= 1; y += 2) {
+    for (var x = -1; x <= 1; x += 2) {
+      visibility += textureSampleCompareLevel(
+        structuralShadowMap, structuralShadowSampler,
+        position.xy + vec2f(f32(x), f32(y)) * texel * 0.72,
+        reference,
+      );
+    }
+  }
+  return visibility * 0.25;
 }
 
 struct FragmentOutput {
@@ -239,51 +230,36 @@ struct FragmentOutput {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
-  let size = vec2i(textureDimensions(worldTexture));
-  let pixel = clamp(vec2i(input.uv * vec2f(size)), vec2i(0), size - 1);
-  let world = camera.world.xy + vec2f(pixel) + vec2f(0.5);
   let base = textureSample(worldTexture, pixelSampler, input.uv).rgb;
-  let baseLuma = luminance(base);
-
-  // Read the authored pixel art as shallow relief. Dark pixels surrounded by
-  // lighter terrain receive a tiny amount of ambient and directional shadow,
-  // strengthening natural edges without blurring or inventing geometry.
-  let neighborhoodLuma = 0.25 * (
-    luminance(loadWorld(pixel + vec2i(-2, 0), size))
-    + luminance(loadWorld(pixel + vec2i(2, 0), size))
-    + luminance(loadWorld(pixel + vec2i(0, -2), size))
-    + luminance(loadWorld(pixel + vec2i(0, 2), size))
-  );
-  let sunwardLuma = luminance(loadWorld(pixel + vec2i(-3, -4), size));
-  let recess = max(neighborhoodLuma - baseLuma, 0.0);
-  let leeEdge = max(sunwardLuma - baseLuma, 0.0);
-  let localShadow = 1.0 - 0.115 * recess - 0.060 * leeEdge;
-
-  // Low-frequency, world-anchored modulation resembles broad cloud/canopy
-  // shadows. A much smaller texel-anchored term breaks up perfect gradients;
-  // neither term moves between frames, so projected pixels never shimmer.
-  let dapple = naturalNoise(world) / 1.75 - 0.5;
-  let grain = hash12(world + vec2f(101.0, 37.0)) - 0.5;
-  let atlasPosition = (vec2f(pixel) + vec2f(0.5)) / vec2f(size) - vec2f(0.5);
-  let sunSweep = dot(atlasPosition, normalize(vec2f(-0.38, -0.92)));
-  let naturalLight = 1.0 + 0.072 * dapple + 0.012 * grain + 0.038 * sunSweep;
-
-  var lit = base * input.shade * localShadow * naturalLight;
-  let warmth = clamp(0.52 + 2.4 * dapple + 0.45 * sunSweep, 0.0, 1.0);
-  let coolShadow = vec3f(0.970, 0.990, 1.035);
-  let warmSun = vec3f(1.035, 1.012, 0.968);
-  lit *= mix(coolShadow, warmSun, warmth);
-
-  let gray = vec3f(luminance(lit));
-  let graded = mix(gray, lit, 1.12);
-  let farHaze = vec3f(0.45, 0.68, 0.76);
-  let atmospheric = mix(graded, farHaze, input.fog * 0.055);
-  let edge = smoothstep(0.58, 1.16, length(atlasPosition * vec2f(1.0, 0.82)));
-  let finished = atmospheric * (1.0 - 0.048 * edge);
+  let normal = normalize(input.normal);
+  let direct = max(dot(normal, TO_KEY), 0.0);
+  let faceLight = 0.70 + 0.39 * direct;
+  let visibility = structuralVisibility(input.shadowPosition, normal);
+  let receiverDensity = select(1.0, 0.44, input.material == SURFACE_WATER);
+  let shadowLight = 1.0 - (1.0 - visibility) * 0.36 * receiverDensity;
+  let illumination = faceLight * shadowLight;
   var output: FragmentOutput;
-  output.color = vec4f(mix(base, finished, camera.values.z), 1.0);
+  output.color = vec4f(base * mix(1.0, illumination, camera.values.z), 1.0);
   output.focusDepth = input.cameraDepth;
   return output;
+}
+`;
+
+const STRUCTURAL_SHADOW_SHADER = /* wgsl */ `
+struct Camera {
+  values: vec4f,
+  viewport: vec4f,
+  world: vec4f,
+  lightTransform: mat4x4f,
+}
+struct VertexInput {
+  @location(0) position: vec3f,
+}
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+@vertex
+fn vertexMain(input: VertexInput) -> @builtin(position) vec4f {
+  return camera.lightTransform * vec4f(input.position, 1.0);
 }
 `;
 
@@ -527,7 +503,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let pixel = clamp(vec2i(input.uv * vec2f(size)), vec2i(0), size - 1);
   let silhouette = textureLoad(shadowMask, pixel, 0).a;
   if (silhouette <= 0.005) { discard; }
-  return vec4f(0.020, 0.052, 0.065, silhouette * 0.520 * camera.values.z);
+  return vec4f(0.0, 0.0, 0.0, silhouette * 0.460 * camera.values.z);
 }
 `;
 
@@ -548,9 +524,12 @@ const CAMERA_HEIGHT = 480;
 const CAMERA_TILT_DEGREES = 45.384615;
 const CAMERA_NEAR = 32;
 const CAMERA_FAR = 1024;
-const VERTEX_FLOATS = 8;
+const VERTEX_FLOATS = 11;
 const BILLBOARD_VERTEX_FLOATS = 20;
 const CAST_SHADOW_VERTEX_FLOATS = 16;
+const STRUCTURAL_SHADOW_SIZE = 1024;
+const LIGHT_MAP_SPAN = 1280;
+const LIGHT_DEPTH_SPAN = 1400;
 
 function webGpuUnavailableError() {
   if (globalThis.isSecureContext === false) {
@@ -606,7 +585,12 @@ class WebGpuPresenter {
     this.gradedTexture = this.createTexture('cinematic graded scene', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, this.sceneWidth, this.sceneHeight);
     this.depthTexture = this.createTexture('high-resolution 3D depth', 'depth24plus', GPUTextureUsage.RENDER_ATTACHMENT, this.sceneWidth, this.sceneHeight);
     this.focusDepthTexture = this.createTexture('physical camera focus depth', 'r32float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT, this.sceneWidth, this.sceneHeight);
-    this.cameraBuffer = device.createBuffer({ label: '3D camera and lighting', size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.structuralShadowTexture = this.createTexture(
+      'world-anchored structural shadow map', 'depth32float',
+      GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+      STRUCTURAL_SHADOW_SIZE, STRUCTURAL_SHADOW_SIZE,
+    );
+    this.cameraBuffer = device.createBuffer({ label: '3D camera, optics, and lighting', size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.vertexCapacity = 1024 * 1024;
     this.vertexBuffer = device.createBuffer({ label: 'projected terrain mesh', size: this.vertexCapacity, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     this.billboardVertexCapacity = 64 * 1024;
@@ -627,6 +611,10 @@ class WebGpuPresenter {
     this.terrainSignature = null;
     this.terrainVertexCount = 0;
     this.sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest', mipmapFilter: 'nearest' });
+    this.structuralShadowSampler = device.createSampler({
+      compare: 'less-equal', magFilter: 'linear', minFilter: 'linear',
+      addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+    });
     this.createPipelines();
     this.resize(scale);
     device.addEventListener('uncapturederror', this.uncapturedErrorHandler);
@@ -648,6 +636,38 @@ class WebGpuPresenter {
     return this.device.createTexture({ label, size: [width, height], format, usage });
   }
 
+  createLightTransform(worldPixelOriginX, worldPixelOriginY) {
+    // Light travels toward the southeast. Keeping the orthographic projection
+    // square and snapping its center to whole shadow texels makes the map
+    // world-anchored while the overscan atlas follows the camera.
+    const length = Math.hypot(0.45, 0.77, 0.45);
+    const forward = [0.45 / length, -0.77 / length, 0.45 / length];
+    const right = [Math.SQRT1_2, 0, -Math.SQRT1_2];
+    const up = [
+      forward[1] * right[2] - forward[2] * right[1],
+      forward[2] * right[0] - forward[0] * right[2],
+      forward[0] * right[1] - forward[1] * right[0],
+    ];
+    const centerX = worldPixelOriginX + this.worldWidth / 2;
+    const centerZ = worldPixelOriginY + this.worldHeight / 2;
+    const texelWorldSize = LIGHT_MAP_SPAN / STRUCTURAL_SHADOW_SIZE;
+    const centerU = right[0] * centerX + right[2] * centerZ;
+    const centerV = up[0] * centerX + up[2] * centerZ;
+    const snappedU = Math.round(centerU / texelWorldSize) * texelWorldSize;
+    const snappedV = Math.round(centerV / texelWorldSize) * texelWorldSize;
+    const xyScale = 2 / LIGHT_MAP_SPAN;
+    const depthScale = 1 / LIGHT_DEPTH_SPAN;
+    return new Float32Array([
+      right[0] * xyScale, up[0] * xyScale, forward[0] * depthScale, 0,
+      right[1] * xyScale, up[1] * xyScale, forward[1] * depthScale, 0,
+      right[2] * xyScale, up[2] * xyScale, forward[2] * depthScale, 0,
+      (centerU - snappedU) * xyScale,
+      (centerV - snappedV) * xyScale,
+      0.5,
+      1,
+    ]);
+  }
+
   createPipelines() {
     const { device } = this;
     const terrainModule = device.createShaderModule({ label: 'projected terrain shader', code: TERRAIN_SHADER });
@@ -658,8 +678,9 @@ class WebGpuPresenter {
         buffers: [{ arrayStride: VERTEX_FLOATS * 4, attributes: [
           { shaderLocation: 0, offset: 0, format: 'float32x3' },
           { shaderLocation: 1, offset: 12, format: 'float32x2' },
-          { shaderLocation: 2, offset: 20, format: 'float32' },
-          { shaderLocation: 3, offset: 24, format: 'float32x2' },
+          { shaderLocation: 2, offset: 20, format: 'float32x3' },
+          { shaderLocation: 3, offset: 32, format: 'float32' },
+          { shaderLocation: 4, offset: 36, format: 'float32x2' },
         ] }],
       },
       fragment: { module: terrainModule, entryPoint: 'fragmentMain', targets: [
@@ -673,7 +694,28 @@ class WebGpuPresenter {
         { binding: 0, resource: this.worldTexture.createView() },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: { buffer: this.cameraBuffer } },
+        { binding: 3, resource: this.structuralShadowTexture.createView() },
+        { binding: 4, resource: this.structuralShadowSampler },
       ],
+    });
+
+    const structuralShadowModule = device.createShaderModule({
+      label: 'structural shadow map shader', code: STRUCTURAL_SHADOW_SHADER,
+    });
+    this.structuralShadowPipeline = device.createRenderPipeline({
+      label: 'terrain and building structural shadow map', layout: 'auto',
+      vertex: {
+        module: structuralShadowModule, entryPoint: 'vertexMain',
+        buffers: [{ arrayStride: VERTEX_FLOATS * 4, attributes: [
+          { shaderLocation: 0, offset: 0, format: 'float32x3' },
+        ] }],
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' },
+    });
+    this.structuralShadowBindGroup = device.createBindGroup({
+      layout: this.structuralShadowPipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: this.cameraBuffer } }],
     });
 
     const castShadowModule = device.createShaderModule({ label: 'projected sprite shadow shader', code: CAST_SHADOW_SHADER });
@@ -891,11 +933,11 @@ class WebGpuPresenter {
     if (unchanged && signature === this.terrainSignature) return this.terrainVertexCount;
 
     const vertices = [];
-    const pushVertex = (x, y, z, u, v, shade, shell, base) =>
-      vertices.push(x, y, z, u, v, shade, shell, base);
-    const quad = (a, b, c, d, shade, shell = 0, base = 0) => {
+    const pushVertex = (x, y, z, u, v, normal, material, shell, base) =>
+      vertices.push(x, y, z, u, v, ...normal, material, shell, base);
+    const quad = (a, b, c, d, normal, material, shell = 0, base = 0) => {
       for (const point of [a, b, c, a, c, d])
-        pushVertex(point[0], point[1], point[2], point[3], point[4], shade, shell, base);
+        pushVertex(point[0], point[1], point[2], point[3], point[4], normal, material, shell, base);
     };
     const halfW = this.worldWidth / 2;
     const halfH = this.worldHeight / 2;
@@ -934,7 +976,7 @@ class WebGpuPresenter {
             [worldX(tx + 1),ground,worldZ(ty),textureU(tx + 1),textureV(sourceY)],
             [worldX(tx + 1),ground,worldZ(ty + 1),textureU(tx + 1),textureV(sourceY + 1)],
             [worldX(tx),ground,worldZ(ty + 1),textureU(tx),textureV(sourceY + 1)],
-            1.0,
+            [0, 1, 0], surfaceAt(tx, sourceY),
           );
           continue;
         }
@@ -966,7 +1008,7 @@ class WebGpuPresenter {
           [worldX(tx + width), height, worldZ(ty), textureU(tx + width), textureV(ty)],
           [worldX(tx + width), height, worldZ(ty + depth), textureU(tx + width), textureV(ty + depth)],
           [worldX(tx), height, worldZ(ty + depth), textureU(tx), textureV(ty + depth)],
-          1.0, shell ? 1 : 0, shell ? groundHeights[start] : 0,
+          [0, 1, 0], surfaceAt(tx, ty), shell ? 1 : 0, shell ? groundHeights[start] : 0,
         );
       }
     }
@@ -1044,7 +1086,7 @@ class WebGpuPresenter {
           [x1, component.base, z, textureU(tx + width), textureV(ty + depth)],
           [x1, top, z, textureU(tx + width), textureV(ty)],
           [x0, top, z, textureU(tx), textureV(ty)],
-          0.88, 1, component.base,
+          [0, 0, 1], SURFACE_WALL, 1, component.base,
         );
         component.x0 = Math.min(component.x0, x0);
         component.x1 = Math.max(component.x1, x1);
@@ -1064,7 +1106,7 @@ class WebGpuPresenter {
     for (const component of components.values()) {
       for (const [tx, ty] of component.roofCells) {
         const height = heightAt(tx, ty);
-        for (const [dx, shade] of [[-1, 0.64], [1, 0.82]]) {
+        for (const dx of [-1, 1]) {
           if (sameRoof(tx + dx, ty, component.id)) continue;
           const bottom = Math.max(component.base, heightAt(tx + dx, ty));
           if (bottom >= height) continue;
@@ -1075,14 +1117,14 @@ class WebGpuPresenter {
           if (dx < 0) {
             quad([x,bottom,worldZ(ty),u,v0], [x,bottom,worldZ(ty + 1),u,v1],
                  [x,height,worldZ(ty + 1),u,v1], [x,height,worldZ(ty),u,v0],
-                 shade, 1, component.base);
+                 [-1, 0, 0], SURFACE_WALL, 1, component.base);
           } else {
             quad([x,bottom,worldZ(ty + 1),u,v1], [x,bottom,worldZ(ty),u,v0],
                  [x,height,worldZ(ty),u,v0], [x,height,worldZ(ty + 1),u,v1],
-                 shade, 1, component.base);
+                 [1, 0, 0], SURFACE_WALL, 1, component.base);
           }
         }
-        for (const [dy, shade] of [[-1, 0.68], [1, 0.88]]) {
+        for (const dy of [-1, 1]) {
           if (sameRoof(tx, ty + dy, component.id)) continue;
           if (dy > 0 && componentAt(tx, ty + 1) === component.id
               && surfaceAt(tx, ty + 1) === SURFACE_WALL) continue;
@@ -1095,13 +1137,13 @@ class WebGpuPresenter {
                  [worldX(tx),bottom,z,textureU(tx),v],
                  [worldX(tx),height,z,textureU(tx),v],
                  [worldX(tx + 1),height,z,textureU(tx + 1),v],
-                 shade, 1, component.base);
+                 [0, 0, -1], SURFACE_WALL, 1, component.base);
           } else {
             quad([worldX(tx),bottom,z,textureU(tx),v],
                  [worldX(tx + 1),bottom,z,textureU(tx + 1),v],
                  [worldX(tx + 1),height,z,textureU(tx + 1),v],
                  [worldX(tx),height,z,textureU(tx),v],
-                 shade, 1, component.base);
+                 [0, 0, 1], SURFACE_WALL, 1, component.base);
           }
         }
       }
@@ -1115,7 +1157,7 @@ class WebGpuPresenter {
       return surface !== SURFACE_ROOF && surface !== SURFACE_WALL && bottom < height
         ? { height, bottom } : null;
     };
-    for (const [dy, shade] of [[-1, 0.68], [1, 0.88]]) {
+    for (const dy of [-1, 1]) {
       for (let ty = 0; ty < rows; ty++) {
         for (let tx = 0; tx < cols; tx++) {
           const edge = ordinaryEdge(tx, ty, 0, dy);
@@ -1126,17 +1168,19 @@ class WebGpuPresenter {
             quad([worldX(tx + 1),edge.bottom,z,textureU(tx + 1),v],
                  [worldX(tx),edge.bottom,z,textureU(tx),v],
                  [worldX(tx),edge.height,z,textureU(tx),v],
-                 [worldX(tx + 1),edge.height,z,textureU(tx + 1),v], shade);
+                 [worldX(tx + 1),edge.height,z,textureU(tx + 1),v],
+                 [0, 0, -1], surfaceAt(tx, ty));
           } else {
             quad([worldX(tx),edge.bottom,z,textureU(tx),v],
                  [worldX(tx + 1),edge.bottom,z,textureU(tx + 1),v],
                  [worldX(tx + 1),edge.height,z,textureU(tx + 1),v],
-                 [worldX(tx),edge.height,z,textureU(tx),v], shade);
+                 [worldX(tx),edge.height,z,textureU(tx),v],
+                 [0, 0, 1], surfaceAt(tx, ty));
           }
         }
       }
     }
-    for (const [dx, shade] of [[-1, 0.64], [1, 0.82]]) {
+    for (const dx of [-1, 1]) {
       for (let tx = 0; tx < cols; tx++) {
         for (let ty = 0; ty < rows; ty++) {
           const edge = ordinaryEdge(tx, ty, dx, 0);
@@ -1147,12 +1191,14 @@ class WebGpuPresenter {
             quad([x,edge.bottom,worldZ(ty),u,textureV(ty)],
                  [x,edge.bottom,worldZ(ty + 1),u,textureV(ty + 1)],
                  [x,edge.height,worldZ(ty + 1),u,textureV(ty + 1)],
-                 [x,edge.height,worldZ(ty),u,textureV(ty)], shade);
+                 [x,edge.height,worldZ(ty),u,textureV(ty)],
+                 [-1, 0, 0], surfaceAt(tx, ty));
           } else {
             quad([x,edge.bottom,worldZ(ty + 1),u,textureV(ty + 1)],
                  [x,edge.bottom,worldZ(ty),u,textureV(ty)],
                  [x,edge.height,worldZ(ty),u,textureV(ty)],
-                 [x,edge.height,worldZ(ty + 1),u,textureV(ty + 1)], shade);
+                 [x,edge.height,worldZ(ty + 1),u,textureV(ty + 1)],
+                 [1, 0, 0], surfaceAt(tx, ty));
           }
         }
       }
@@ -1297,8 +1343,10 @@ class WebGpuPresenter {
         // Sink the lowest opaque sprite row into the receiver plane so the
         // silhouette begins under the entity instead of after a raster gap.
         const height = Math.max(0, group.anchorY - (screenY + v) - 1);
-        const x = group.anchorX - this.width / 2 + (screenX - group.anchorX + u) - height * 0.16;
-        const z = group.anchorY - this.height / 2 - height * 1.65;
+        // Match the structural northwest key: elevated sprite pixels project
+        // along the same southeast light ray as roofs and cliffs.
+        const x = group.anchorX - this.width / 2 + (screenX - group.anchorX + u) + height * 0.584;
+        const z = group.anchorY - this.height / 2 + height * 0.584;
         return { x, y: this.terrainGroundHeightAt(x, z), z };
       };
       // Leave a three-source-pixel apron around every projected component so
@@ -1491,7 +1539,28 @@ class WebGpuPresenter {
       this.writeObjectSources(objectSourcePixels, objectSourceCount);
       this.writeTexture(this.bgPriorityTexture, bgPriorities, this.worldWidth, this.worldHeight, 1);
       this.writeTexture(this.uiTexture, this.uiPixels);
-      this.device.queue.writeBuffer(this.cameraBuffer, 0, new Float32Array([perspective, zoom, shading, CAMERA_HEIGHT, this.width, this.height, CAMERA_NEAR, CAMERA_FAR, worldPixelOriginX, worldPixelOriginY, optics, 0]));
+      const cameraValues = new Float32Array(28);
+      cameraValues.set([
+        perspective, zoom, shading, CAMERA_HEIGHT,
+        this.width, this.height, CAMERA_NEAR, CAMERA_FAR,
+        worldPixelOriginX, worldPixelOriginY, optics, 0,
+      ]);
+      cameraValues.set(this.createLightTransform(worldPixelOriginX, worldPixelOriginY), 12);
+      this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraValues);
+
+      const structuralShadowPass = encoder.beginRenderPass({
+        label: 'world-anchored structural shadow map pass',
+        colorAttachments: [],
+        depthStencilAttachment: {
+          view: this.structuralShadowTexture.createView(),
+          depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store',
+        },
+      });
+      structuralShadowPass.setPipeline(this.structuralShadowPipeline);
+      structuralShadowPass.setBindGroup(0, this.structuralShadowBindGroup);
+      structuralShadowPass.setVertexBuffer(0, this.vertexBuffer);
+      structuralShadowPass.draw(vertexCount);
+      structuralShadowPass.end();
 
       const terrainPass = encoder.beginRenderPass({
         label: 'depth-tested projected terrain pass',
@@ -1561,7 +1630,7 @@ class WebGpuPresenter {
     this.disposed = true;
     this.device.removeEventListener('uncapturederror', this.uncapturedErrorHandler);
     this.context.unconfigure();
-    for (const resource of [this.finalTexture,this.worldTexture,this.objectTexture,this.bgPriorityTexture,this.uiTexture,this.sceneTexture,this.castShadowTexture,this.gradedTexture,this.depthTexture,this.focusDepthTexture,this.vertexBuffer,this.billboardVertexBuffer,this.castShadowVertexBuffer,this.cameraBuffer]) resource.destroy();
+    for (const resource of [this.finalTexture,this.worldTexture,this.objectTexture,this.bgPriorityTexture,this.uiTexture,this.sceneTexture,this.castShadowTexture,this.gradedTexture,this.depthTexture,this.focusDepthTexture,this.structuralShadowTexture,this.vertexBuffer,this.billboardVertexBuffer,this.castShadowVertexBuffer,this.cameraBuffer]) resource.destroy();
     this.device.destroy();
   }
 
