@@ -299,10 +299,25 @@ struct FragmentOutput {
   @builtin(frag_depth) depth: f32,
 }
 
+fn objectColor(input: VertexOutput) -> vec4f {
+  let dest = vec2i(floor(input.uv));
+  var source = dest;
+  if (input.affine != 0u) {
+    let delta = dest - vec2i(input.drawSize) / 2;
+    source = vec2i(
+      (input.matrix.x * delta.x + input.matrix.y * delta.y) >> 8,
+      (input.matrix.z * delta.x + input.matrix.w * delta.y) >> 8
+    ) + vec2i(input.sourceSize) / 2;
+  }
+  if (any(source < vec2i(0)) || any(source >= vec2i(input.sourceSize))) {
+    return vec4f(0.0);
+  }
+  return textureLoad(objectTexture, source, i32(input.layer), 0);
+}
+
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
-  let dest = vec2i(floor(input.uv));
-  let screen = input.screenOrigin + dest;
+  let screen = input.screenOrigin + vec2i(floor(input.uv));
   let prioritySize = vec2i(textureDimensions(bgPriorityTexture));
   let atlas = screen + (prioritySize - vec2i(240, 160)) / 2;
   let inAtlas = all(atlas >= vec2i(0)) && all(atlas < prioritySize);
@@ -313,16 +328,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
     occluded = bgPriority < input.objectInfo.y;
   }
 
-  var source = dest;
-  if (input.affine != 0u) {
-    let delta = dest - vec2i(input.drawSize) / 2;
-    source = vec2i(
-      (input.matrix.x * delta.x + input.matrix.y * delta.y) >> 8,
-      (input.matrix.z * delta.x + input.matrix.w * delta.y) >> 8
-    ) + vec2i(input.sourceSize) / 2;
-  }
-  if (any(source < vec2i(0)) || any(source >= vec2i(input.sourceSize))) { discard; }
-  let color = textureLoad(objectTexture, source, i32(input.layer), 0);
+  let color = objectColor(input);
   if (color.a <= 0.0) { discard; }
   var output: FragmentOutput;
   if (occluded) {
@@ -334,6 +340,13 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   }
   output.depth = input.position.z;
   return output;
+}
+
+@fragment
+fn fragmentSilhouette(input: VertexOutput) -> @location(0) vec4f {
+  let color = objectColor(input);
+  if (color.a <= 0.0) { discard; }
+  return vec4f(mix(color.rgb, vec3f(0.72, 0.88, 0.92), 0.24), color.a * 0.62);
 }
 `;
 const CAST_SHADOW_SHADER = /* wgsl */ `
@@ -631,29 +644,30 @@ class WebGpuPresenter {
     });
 
     const billboardModule = device.createShaderModule({ label: 'entity billboard shader', code: BILLBOARD_SHADER });
+    const billboardVertex = {
+      module: billboardModule, entryPoint: 'vertexMain',
+      buffers: [{ arrayStride: BILLBOARD_VERTEX_FLOATS * 4, attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x2' },
+        { shaderLocation: 1, offset: 8, format: 'float32x2' },
+        { shaderLocation: 2, offset: 16, format: 'float32' },
+        { shaderLocation: 3, offset: 20, format: 'float32' },
+        { shaderLocation: 4, offset: 24, format: 'float32x2' },
+        { shaderLocation: 5, offset: 32, format: 'float32x2' },
+        { shaderLocation: 6, offset: 40, format: 'float32' },
+        { shaderLocation: 7, offset: 44, format: 'float32x4' },
+        { shaderLocation: 8, offset: 60, format: 'float32x2' },
+        { shaderLocation: 9, offset: 68, format: 'float32x2' },
+      ] }],
+    };
+    const billboardBlend = {
+      color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+      alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+    };
     this.billboardPipeline = device.createRenderPipeline({
       label: 'depth-tested upright entity billboards', layout: 'auto',
-      vertex: {
-        module: billboardModule, entryPoint: 'vertexMain',
-        buffers: [{ arrayStride: BILLBOARD_VERTEX_FLOATS * 4, attributes: [
-          { shaderLocation: 0, offset: 0, format: 'float32x2' },
-          { shaderLocation: 1, offset: 8, format: 'float32x2' },
-          { shaderLocation: 2, offset: 16, format: 'float32' },
-          { shaderLocation: 3, offset: 20, format: 'float32' },
-          { shaderLocation: 4, offset: 24, format: 'float32x2' },
-          { shaderLocation: 5, offset: 32, format: 'float32x2' },
-          { shaderLocation: 6, offset: 40, format: 'float32' },
-          { shaderLocation: 7, offset: 44, format: 'float32x4' },
-          { shaderLocation: 8, offset: 60, format: 'float32x2' },
-          { shaderLocation: 9, offset: 68, format: 'float32x2' },
-        ] }],
-      },
+      vertex: billboardVertex,
       fragment: { module: billboardModule, entryPoint: 'fragmentMain', targets: [{
-        format: 'rgba8unorm',
-        blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-        },
+        format: 'rgba8unorm', blend: billboardBlend,
       }] },
       primitive: { topology: 'triangle-list' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less-equal' },
@@ -662,6 +676,19 @@ class WebGpuPresenter {
       layout: this.billboardPipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: this.objectTexture.createView({ dimension: '2d-array' }) },
         { binding: 1, resource: this.bgPriorityTexture.createView() },
+      ],
+    });
+    this.actorSilhouettePipeline = device.createRenderPipeline({
+      label: 'whole-actor building occlusion silhouettes', layout: 'auto',
+      vertex: billboardVertex,
+      fragment: { module: billboardModule, entryPoint: 'fragmentSilhouette', targets: [{
+        format: 'rgba8unorm', blend: billboardBlend,
+      }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    this.actorSilhouetteBindGroup = device.createBindGroup({
+      layout: this.actorSilhouettePipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: this.objectTexture.createView({ dimension: '2d-array' }) },
       ],
     });
 
@@ -1073,21 +1100,16 @@ class WebGpuPresenter {
     };
   }
 
-  actorDepthAt(actorX0, actorX1, footZ, tilt, zoom) {
-    // Resolve each actor against complete authored building shells from its
-    // foot. Every card in the actor then receives one depth, independent of
-    // perspective, so roofs and facades cannot slice or reorder the actor.
-    let depth = 0;
+  actorOccludedByShell(actorX0, actorX1, footZ) {
+    // Resolve the whole owning actor from its grouped foot and horizontal span.
+    // A building shell never gets to reject only part of one actor's cards.
     for (const component of this.buildingComponents) {
       const overlapsX = actorX1 > component.x0 && actorX0 < component.x1;
       const behindFacade = footZ < component.frontZ - 0.5;
       if (!overlapsX || !behindFacade) continue;
-      const componentDepth = this.cameraProjection(
-        0, component.base, component.minZ, tilt, zoom,
-      ).depth + 0.00002;
-      depth = Math.max(depth, componentDepth);
+      return true;
     }
-    return depth;
+    return false;
   }
 
   measureObjectFootRows(objectDescriptors, objectSourceCount, objectEventSpriteFlags,
@@ -1258,6 +1280,13 @@ class WebGpuPresenter {
         groupX1[spriteId], objectDescriptors[o + 1] + objectDescriptors[o + 7] - this.width / 2,
       );
     }
+    const shellOccludedGroups = new Uint8Array(objectEventSpriteFlags.length);
+    for (let spriteId = 0; spriteId < shellOccludedGroups.length; spriteId++) {
+      if (!objectEventSpriteFlags[spriteId] || groupAnchorY[spriteId] <= -32768) continue;
+      shellOccludedGroups[spriteId] = this.actorOccludedByShell(
+        groupX0[spriteId], groupX1[spriteId], groupAnchorY[spriteId] - this.height / 2,
+      );
+    }
 
     const order = Array.from({ length: objectSourceCount }, (_, index) => index);
     order.sort((a, b) => {
@@ -1265,8 +1294,9 @@ class WebGpuPresenter {
       return objectDescriptors[bo + 9] - objectDescriptors[ao + 9]
         || objectDescriptors[bo] - objectDescriptors[ao];
     });
-    const vertices = [];
-    const vertex = (x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
+    const normalVertices = [];
+    const silhouetteVertices = [];
+    const vertex = (vertices, x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
                     affine, pa, pb, pc, pd, screenX, screenY, oamId, priority) =>
       vertices.push(x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
                     affine, pa, pb, pc, pd, screenX, screenY, oamId, priority);
@@ -1297,29 +1327,31 @@ class WebGpuPresenter {
       const x1 = x0 + drawW * projected.scale;
       const y0 = projected.y + (screenY - anchorY) * projected.scale;
       const y1 = y0 + drawH * projected.scale;
-      // Only authored building components participate in 3D billboard depth.
-      // Native BG priority remains authoritative for unrelated overhead art.
       const isActor = spriteId >= 0 && spriteId < objectEventSpriteFlags.length
         && objectEventSpriteFlags[spriteId];
-      const depth = isActor
-        ? this.actorDepthAt(groupX0[spriteId], groupX1[spriteId], groundZ, tilt, zoom)
-        : 0;
-      const extra = [depth, layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd,
+      // Shell-occluded actors move as complete owning groups to the silhouette
+      // pass. All other cards retain native per-pixel BG priority behavior.
+      const vertices = isActor && shellOccludedGroups[spriteId]
+        ? silhouetteVertices : normalVertices;
+      const extra = [0, layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd,
                      screenX, screenY, oamId, priority];
       for (const point of [
         [x0,y0,0,0], [x1,y0,drawW,0], [x1,y1,drawW,drawH],
         [x0,y0,0,0], [x1,y1,drawW,drawH], [x0,y1,0,drawH],
-      ]) vertex(point[0], point[1], point[2], point[3], ...extra);
+      ]) vertex(vertices, point[0], point[1], point[2], point[3], ...extra);
     }
 
-    const data = new Float32Array(vertices);
+    const data = new Float32Array([...normalVertices, ...silhouetteVertices]);
     if (data.byteLength > this.billboardVertexCapacity) {
       this.billboardVertexBuffer.destroy();
       this.billboardVertexCapacity = 2 ** Math.ceil(Math.log2(data.byteLength));
       this.billboardVertexBuffer = this.device.createBuffer({ label: 'high-resolution billboard quads', size: this.billboardVertexCapacity, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     }
     if (data.byteLength) this.device.queue.writeBuffer(this.billboardVertexBuffer, 0, data);
-    return data.length / BILLBOARD_VERTEX_FLOATS;
+    return {
+      normal: normalVertices.length / BILLBOARD_VERTEX_FLOATS,
+      silhouette: silhouetteVertices.length / BILLBOARD_VERTEX_FLOATS,
+    };
   }
 
   writeTexture(texture, pixels, width = this.width, height = this.height, bytesPerPixel = 4) {
@@ -1345,7 +1377,7 @@ class WebGpuPresenter {
         worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels,
         worldGridOffsetX, worldGridOffsetY,
       );
-      const billboardVertexCount = this.buildFrameLayers(
+      const billboardVertexCounts = this.buildFrameLayers(
         finalPixels, layerPixels, objectIds, objectPixels, objectPriorities,
         objectDescriptors, objectEventSpriteFlags, objectSourceCount, perspective, zoom,
       );
@@ -1375,12 +1407,20 @@ class WebGpuPresenter {
       });
       castShadowCompositePass.setPipeline(this.castShadowCompositePipeline); castShadowCompositePass.setBindGroup(0, this.castShadowCompositeBindGroup); castShadowCompositePass.draw(3); castShadowCompositePass.end();
 
+      if (billboardVertexCounts.silhouette) {
+        const actorSilhouettePass = encoder.beginRenderPass({
+          label: 'whole-actor building occlusion silhouette pass',
+          colorAttachments: [{ view: this.sceneTexture.createView(), loadOp: 'load', storeOp: 'store' }],
+        });
+        actorSilhouettePass.setPipeline(this.actorSilhouettePipeline); actorSilhouettePass.setBindGroup(0, this.actorSilhouetteBindGroup); actorSilhouettePass.setVertexBuffer(0, this.billboardVertexBuffer); actorSilhouettePass.draw(billboardVertexCounts.silhouette, 1, billboardVertexCounts.normal); actorSilhouettePass.end();
+      }
+
       const billboardPass = encoder.beginRenderPass({
         label: 'upright billboard pass',
         colorAttachments: [{ view: this.sceneTexture.createView(), loadOp: 'load', storeOp: 'store' }],
         depthStencilAttachment: { view: this.depthTexture.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
       });
-      billboardPass.setPipeline(this.billboardPipeline); billboardPass.setBindGroup(0, this.billboardBindGroup); billboardPass.setVertexBuffer(0, this.billboardVertexBuffer); billboardPass.draw(billboardVertexCount); billboardPass.end();
+      billboardPass.setPipeline(this.billboardPipeline); billboardPass.setBindGroup(0, this.billboardBindGroup); billboardPass.setVertexBuffer(0, this.billboardVertexBuffer); billboardPass.draw(billboardVertexCounts.normal); billboardPass.end();
 
       const cinematicPass = encoder.beginRenderPass({
         label: 'cinematic HD-2D post-process',
