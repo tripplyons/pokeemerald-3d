@@ -243,7 +243,11 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   let visibility = structuralVisibility(input.shadowPosition, normal);
   let receiverDensity = select(1.0, 0.44, input.material == SURFACE_WATER);
   let shadowLight = 1.0 - (1.0 - visibility) * 0.36 * receiverDensity;
-  let illumination = faceLight * shadowLight;
+  // Give generated side/rear closure enough contrast to read as volume on a
+  // small display. The lighting-strength mix below still makes this a no-op
+  // at 0%, while authored roof and facade pixels remain untouched.
+  let closureLight = select(1.0, 0.82, input.material == MATERIAL_NEUTRAL_BUILDING);
+  let illumination = faceLight * shadowLight * closureLight;
   var output: FragmentOutput;
   output.color = vec4f(base * mix(1.0, illumination, camera.values.z), 1.0);
   output.focusDepth = input.cameraDepth;
