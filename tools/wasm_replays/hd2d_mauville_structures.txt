@@ -1,0 +1,36 @@
+# Dense Mauville building coverage matching the supplied mobile screenshot.
+# Run with the user's save to preserve their normal game flags and object state:
+# node tools/wasm_replay.mjs tools/wasm_replays/hd2d_mauville_structures.txt \
+#   /tmp/hd2d-mauville --save="$HOME/Downloads/pokeemerald (2).sav"
+
+# Pokemon Center, Bike Shop, and their closely spaced roof/facade masses.
+120 warp 0 2 27 9
+320 screenshot mauville-pc-bike-shop
+320 probe state
+321 probe hd2d-courses
+322 probe world-atlas
+323 probe height-map
+
+# Hold a complete sub-tile step so component boundaries cannot pop midway.
+324 button right on
+332 screenshot mauville-pc-bike-shop-step-early
+340 screenshot mauville-pc-bike-shop-step-mid
+348 screenshot mauville-pc-bike-shop-step-late
+356 button right off
+436 screenshot mauville-pc-bike-shop-step-complete
+436 probe hd2d-courses
+
+# Game Corner, gym, and west-side building edges.
+440 warp 0 2 13 9
+640 screenshot mauville-gym-game-corner
+640 probe hd2d-courses
+
+# Mart, houses, and the lower row of adjacent structures.
+644 warp 0 2 25 17
+844 screenshot mauville-south-buildings
+844 probe hd2d-courses
+
+# Inspect the eastern building sides from below and near the atlas edge.
+848 warp 0 2 35 10
+1048 screenshot mauville-bike-shop-east-side
+1048 probe hd2d-courses
