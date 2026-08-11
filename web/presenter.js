@@ -958,21 +958,26 @@ class WebGpuPresenter {
     const SURFACE_WALL = 5;
     const SURFACE_ROOF = 6;
 
-    // A vertical face is an extrusion of one authored source tile, not a
-    // stretched edge texel. Keep each course within that tile and align its
-    // top edge with the corresponding source edge so neighboring faces do not
-    // develop a UV seam. The source tile is deliberately supplied by the
-    // caller: ordinary terrain uses its exposed tile, while building closure
-    // uses the nearest authored roof boundary tile.
+    // A vertical face is an extrusion of the authored lower surface beside an
+    // edge, not a repetition of the elevated top tile. Each physical course
+    // consumes the next map tile in the exposed direction. This keeps a cliff
+    // or shell perimeter tied to the same source material that is visible at
+    // its foot, while retaining one nearest-sampled source tile per 8-unit
+    // course. Building closure supplies its nearest authored roof boundary
+    // tile; ordinary terrain supplies the elevated tile, and both paths use
+    // this identical lower-neighbor contract.
     const verticalSide = (tx, ty, bottom, height, sourceX, sourceY, dx, dy,
                           normal, material, shell = 0, base = 0) => {
       if (bottom >= height) return;
-      const u0 = pixelU(originX + sourceX * TILE_SIZE);
-      const u1 = pixelU(originX + sourceX * TILE_SIZE + TILE_SIZE - 1);
-      const v0 = pixelV(originY + sourceY * TILE_SIZE);
-      const v1 = pixelV(originY + sourceY * TILE_SIZE + TILE_SIZE - 1);
       for (let courseBottom = bottom; courseBottom < height; courseBottom += TILE_SIZE) {
         const courseTop = Math.min(height, courseBottom + TILE_SIZE);
+        const course = Math.floor((courseBottom - bottom) / TILE_SIZE);
+        const courseSourceX = Math.max(0, Math.min(cols - 1, sourceX + dx * (course + 1)));
+        const courseSourceY = Math.max(0, Math.min(rows - 1, sourceY + dy * (course + 1)));
+        const u0 = pixelU(originX + courseSourceX * TILE_SIZE);
+        const u1 = pixelU(originX + courseSourceX * TILE_SIZE + TILE_SIZE - 1);
+        const v0 = pixelV(originY + courseSourceY * TILE_SIZE);
+        const v1 = pixelV(originY + courseSourceY * TILE_SIZE + TILE_SIZE - 1);
         if (dy < 0) {
           const z = worldZ(ty);
           quad([worldX(tx + 1),courseBottom,z,u1,v1],

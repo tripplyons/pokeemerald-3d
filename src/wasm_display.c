@@ -1344,6 +1344,9 @@ static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
 
 static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols)
 {
+    if (index < sampleCols
+     || index + sampleCols >= HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS)
+        return FALSE;
     return HdMapSampleIsWallCandidate(index)
         && HdMapSampleIsOpaqueBlocked(index - sampleCols)
         && sHdMapSamples[index + sampleCols].valid
@@ -1352,9 +1355,13 @@ static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols)
 
 static bool8 HdMapSampleIsFacadeSpanCell(u32 index, u32 sampleCols)
 {
-    return HdMapSampleIsStructuralMaterial(index)
-        && HdMapSampleHasTopArt(index)
-        && HdMapSampleHasTopArt(index - sampleCols);
+    // A facade span is still authored wall/door material. Requiring only top
+    // art admitted flowerbeds and paved paths into a building shell whenever
+    // they touched a covered roof cell; those cells then inherited the shell's
+    // height and side closures. Keep the same support contract as the core so
+    // every claimed span cell has an opaque authored course above and a valid
+    // walkable course below.
+    return HdMapSampleIsSupportedWallCore(index, sampleCols);
 }
 
 static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX, u32 sampleCols)
@@ -1363,9 +1370,7 @@ static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX, u32 sampleCo
     {
         const u32 index = row * sampleCols + x;
 
-        if (!HdMapSampleIsStructuralMaterial(index)
-         || !HdMapSampleHasTopArt(index)
-         || UNPACK_LAYER_TYPE(sHdMapAttributes[index]) != METATILE_LAYER_TYPE_COVERED)
+        if (!HdMapSampleIsSupportedWallCore(index, sampleCols))
             return FALSE;
     }
     return TRUE;
