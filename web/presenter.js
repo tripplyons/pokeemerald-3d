@@ -144,6 +144,7 @@ struct VertexInput {
   @location(1) uv: vec2f,
   @location(2) normal: vec3f,
   @location(3) material: f32,
+  @location(5) neutralColor: vec3f,
 }
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -152,6 +153,7 @@ struct VertexOutput {
   @location(2) @interpolate(flat) material: u32,
   @location(3) shadowPosition: vec3f,
   @location(4) cameraDepth: f32,
+  @location(5) @interpolate(flat) neutralColor: vec3f,
 }
 @group(0) @binding(0) var worldTexture: texture_2d<f32>;
 @group(0) @binding(1) var pixelSampler: sampler;
@@ -184,6 +186,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
   output.uv = input.uv;
   output.normal = input.normal;
   output.material = u32(input.material);
+  output.neutralColor = input.neutralColor;
   let lightClip = camera.lightTransform * vec4f(input.position, 1.0);
   output.shadowPosition = vec3f(
     lightClip.x * 0.5 + 0.5,
@@ -196,6 +199,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
 const TO_KEY = normalize(vec3f(-0.45, 0.77, -0.45));
 const SURFACE_WATER = 1u;
+const MATERIAL_NEUTRAL_BUILDING = 8u;
 
 fn structuralVisibility(position: vec3f, normal: vec3f) -> f32 {
   if (any(position.xy <= vec2f(0.001)) || any(position.xy >= vec2f(0.999))
@@ -225,7 +229,14 @@ struct FragmentOutput {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
-  let base = textureSample(worldTexture, pixelSampler, input.uv).rgb;
+  var base: vec3f;
+  if (input.material == MATERIAL_NEUTRAL_BUILDING) {
+    // Unauthored closure geometry uses a component-derived material. Do not
+    // sample arbitrary atlas pixels that can contain paths, doors, or logos.
+    base = input.neutralColor;
+  } else {
+    base = textureSampleLevel(worldTexture, pixelSampler, input.uv, 0.0).rgb;
+  }
   let normal = normalize(input.normal);
   let direct = max(dot(normal, TO_KEY), 0.0);
   let faceLight = 0.70 + 0.39 * direct;
@@ -519,7 +530,7 @@ const CAMERA_HEIGHT = 480;
 const CAMERA_TILT_DEGREES = 45.384615;
 const CAMERA_NEAR = 32;
 const CAMERA_FAR = 1024;
-const VERTEX_FLOATS = 11;
+const VERTEX_FLOATS = 14;
 const BILLBOARD_VERTEX_FLOATS = 20;
 const CAST_SHADOW_VERTEX_FLOATS = 16;
 const STRUCTURAL_SHADOW_SIZE = 1024;
@@ -679,6 +690,7 @@ class WebGpuPresenter {
           { shaderLocation: 2, offset: 20, format: 'float32x3' },
           { shaderLocation: 3, offset: 32, format: 'float32' },
           { shaderLocation: 4, offset: 36, format: 'float32x2' },
+          { shaderLocation: 5, offset: 44, format: 'float32x3' },
         ] }],
       },
       fragment: { module: terrainModule, entryPoint: 'fragmentMain', targets: [
@@ -889,7 +901,8 @@ class WebGpuPresenter {
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
   }
 
-  buildTerrain(worldHeights, worldGroundHeights, worldGeometry, gridOffsetX, gridOffsetY) {
+  buildTerrain(worldHeights, worldGroundHeights, worldGeometry, worldPixels,
+               gridOffsetX, gridOffsetY) {
     const originX = gridOffsetX - TILE_SIZE;
     const originY = gridOffsetY - TILE_SIZE;
     const cols = Math.ceil((this.worldWidth - originX) / TILE_SIZE);
@@ -931,11 +944,13 @@ class WebGpuPresenter {
     if (unchanged && signature === this.terrainSignature) return this.terrainVertexCount;
 
     const vertices = [];
-    const pushVertex = (x, y, z, u, v, normal, material, shell, base) =>
-      vertices.push(x, y, z, u, v, ...normal, material, shell, base);
-    const quad = (a, b, c, d, normal, material, shell = 0, base = 0) => {
+    const pushVertex = (x, y, z, u, v, normal, material, shell, base, neutralColor) =>
+      vertices.push(x, y, z, u, v, ...normal, material, shell, base, ...neutralColor);
+    const quad = (a, b, c, d, normal, material, shell = 0, base = 0,
+                  neutralColor = [0, 0, 0]) => {
       for (const point of [a, b, c, a, c, d])
-        pushVertex(point[0], point[1], point[2], point[3], point[4], normal, material, shell, base);
+        pushVertex(point[0], point[1], point[2], point[3], point[4], normal,
+                   material, shell, base, neutralColor);
     };
     const halfW = this.worldWidth / 2;
     const halfH = this.worldHeight / 2;
@@ -952,17 +967,19 @@ class WebGpuPresenter {
     const pixelV = (pixel) => (Math.max(0, Math.min(this.worldHeight - 1, pixel)) + 0.5) / this.worldHeight;
     const SURFACE_WALL = 5;
     const SURFACE_ROOF = 6;
+    const MATERIAL_NEUTRAL_BUILDING = 8;
 
     // A vertical face is an extrusion of the authored lower surface beside an
     // edge, not a repetition of the elevated top tile. Each physical course
     // consumes the next map tile in the exposed direction. This keeps a cliff
     // or shell perimeter tied to the same source material that is visible at
     // its foot, while retaining one nearest-sampled source tile per 8-unit
-    // course. Building closure supplies its nearest authored roof boundary
-    // tile; ordinary terrain supplies the elevated tile, and both paths use
-    // this identical lower-neighbor contract.
+    // course. Ordinary terrain follows that source contract; unauthored
+    // building closure instead carries a filtered component color and never
+    // samples these atlas coordinates.
     const verticalSide = (tx, ty, bottom, height, sourceX, sourceY, dx, dy,
-                          normal, material, shell = 0, base = 0) => {
+                          normal, material, shell = 0, base = 0,
+                          neutralColor = [0, 0, 0]) => {
       if (bottom >= height) return;
       for (let courseBottom = bottom; courseBottom < height; courseBottom += TILE_SIZE) {
         const courseTop = Math.min(height, courseBottom + TILE_SIZE);
@@ -979,28 +996,28 @@ class WebGpuPresenter {
                [worldX(tx),courseBottom,z,u0,v1],
                [worldX(tx),courseTop,z,u0,v0],
                [worldX(tx + 1),courseTop,z,u1,v0],
-               normal, material, shell, base);
+               normal, material, shell, base, neutralColor);
         } else if (dy > 0) {
           const z = worldZ(ty + 1);
           quad([worldX(tx),courseBottom,z,u0,v0],
                [worldX(tx + 1),courseBottom,z,u1,v0],
                [worldX(tx + 1),courseTop,z,u1,v1],
                [worldX(tx),courseTop,z,u0,v1],
-               normal, material, shell, base);
+               normal, material, shell, base, neutralColor);
         } else if (dx < 0) {
           const x = worldX(tx);
           quad([x,courseBottom,worldZ(ty),u1,v0],
                [x,courseBottom,worldZ(ty + 1),u1,v1],
                [x,courseTop,worldZ(ty + 1),u0,v1],
                [x,courseTop,worldZ(ty),u0,v0],
-               normal, material, shell, base);
+               normal, material, shell, base, neutralColor);
         } else {
           const x = worldX(tx + 1);
           quad([x,courseBottom,worldZ(ty + 1),u0,v1],
                [x,courseBottom,worldZ(ty),u0,v0],
                [x,courseTop,worldZ(ty),u1,v0],
                [x,courseTop,worldZ(ty + 1),u1,v1],
-               normal, material, shell, base);
+               normal, material, shell, base, neutralColor);
         }
       }
     };
@@ -1170,6 +1187,57 @@ class WebGpuPresenter {
       Number.isFinite(component.x0) && Number.isFinite(component.x1)
         && Number.isFinite(component.minZ) && Number.isFinite(component.frontZ));
 
+    // Build a neutral structural color from pixels recurring across the
+    // component's authored tiles. One-off markings cannot enter the generated
+    // treatment merely by occupying many pixels in a door, logo, or sign tile.
+    const componentNeutralColor = (cells, fallback) => {
+      const buckets = new Map();
+      for (let cellIndex = 0; cellIndex < cells.length; cellIndex++) {
+        const [tx, ty] = cells[cellIndex];
+        const seenInCell = new Set();
+        const x0 = Math.max(0, Math.min(this.worldWidth - 1, originX + tx * TILE_SIZE));
+        const y0 = Math.max(0, Math.min(this.worldHeight - 1, originY + ty * TILE_SIZE));
+        const x1 = Math.min(this.worldWidth, x0 + TILE_SIZE);
+        const y1 = Math.min(this.worldHeight, y0 + TILE_SIZE);
+        for (let py = y0; py < y1; py++) {
+          for (let px = x0; px < x1; px++) {
+            const offset = (py * this.worldWidth + px) * 4;
+            if (worldPixels[offset + 3] < 128) continue;
+            const red = worldPixels[offset];
+            const green = worldPixels[offset + 1];
+            const blue = worldPixels[offset + 2];
+            const key = (red >> 4) << 8 | (green >> 4) << 4 | (blue >> 4);
+            let bucket = buckets.get(key);
+            if (!bucket) {
+              bucket = { count: 0, cells: 0, red: 0, green: 0, blue: 0 };
+              buckets.set(key, bucket);
+            }
+            if (!seenInCell.has(key)) {
+              seenInCell.add(key);
+              bucket.cells++;
+            }
+            bucket.count++;
+            bucket.red += red;
+            bucket.green += green;
+            bucket.blue += blue;
+          }
+        }
+      }
+      const minimumCells = Math.max(1, Math.ceil(cells.length * 0.55));
+      const candidates = Array.from(buckets.values())
+        .filter((bucket) => bucket.cells >= minimumCells)
+        .sort((a, b) => b.count - a.count || b.cells - a.cells);
+      if (!candidates.length) return fallback;
+      return [candidates[0].red, candidates[0].green, candidates[0].blue].map(
+        (channel) => channel / candidates[0].count / 255,
+      );
+    };
+    for (const component of components.values()) {
+      const wallCells = component.wallCells.map(([tx, ty]) => [tx, ty]);
+      const roofColor = componentNeutralColor(component.roofCells, [0.45, 0.45, 0.48]);
+      component.sideMaterial = componentNeutralColor(wallCells, roofColor);
+    }
+
     // Fill the footprint represented by vertical facade source courses with
     // the adjacent roof boundary course. This extends the authored top mass to
     // the relocated front without ever laying facade pixels horizontally.
@@ -1226,13 +1294,9 @@ class WebGpuPresenter {
       }
 
       for (const [tx, ty, top] of component.wallCells) {
-        const source = localRoofSource(tx, ty);
-        if (!source) continue;
-        const [sourceX, sourceY] = source;
-
         // Continue exposed side/rear closure through the new top footprint.
-        // Its UVs use the same local roof boundary material; the exposed south
-        // edge is the facade itself and must not receive a second skin.
+        // The exposed south edge is the facade itself and must not receive a
+        // second skin.
         for (const dx of [-1, 1]) {
           const neighborIsShell = sameRoof(tx + dx, ty, component.id)
             || (inGrid(tx + dx, ty) && surfaceAt(tx + dx, ty) === SURFACE_WALL
@@ -1240,8 +1304,9 @@ class WebGpuPresenter {
           if (neighborIsShell) continue;
           const bottom = Math.max(component.base, heightAt(tx + dx, ty));
           if (bottom >= top) continue;
-          verticalSide(tx, ty, bottom, top, sourceX, sourceY, dx, 0,
-                       [dx < 0 ? -1 : 1, 0, 0], SURFACE_WALL, 1, component.base);
+          verticalSide(tx, ty, bottom, top, tx, ty, dx, 0,
+                       [dx < 0 ? -1 : 1, 0, 0], MATERIAL_NEUTRAL_BUILDING,
+                       1, component.base, component.sideMaterial);
         }
         const northIsShell = sameRoof(tx, ty - 1, component.id)
           || (inGrid(tx, ty - 1) && surfaceAt(tx, ty - 1) === SURFACE_WALL
@@ -1249,15 +1314,16 @@ class WebGpuPresenter {
         if (!northIsShell) {
           const bottom = Math.max(component.base, heightAt(tx, ty - 1));
           if (bottom < top) {
-            verticalSide(tx, ty, bottom, top, sourceX, sourceY, 0, -1,
-                         [0, 0, -1], SURFACE_WALL, 1, component.base);
+            verticalSide(tx, ty, bottom, top, tx, ty, 0, -1,
+                         [0, 0, -1], MATERIAL_NEUTRAL_BUILDING,
+                         1, component.base, component.sideMaterial);
           }
         }
       }
 
-      // Close only exposed building perimeter. Side/rear UVs come from the
-      // local roof boundary course, not a facade column stretched through roof
-      // depth. Wall top cells above make the former roof/facade seam internal.
+      // Close only exposed building perimeter with the same component-derived
+      // side treatment. Wall top cells above make the former roof/facade seam
+      // internal.
       for (const [tx, ty] of component.roofCells) {
         const height = heightAt(tx, ty);
         for (const dx of [-1, 1]) {
@@ -1265,7 +1331,8 @@ class WebGpuPresenter {
           const bottom = Math.max(component.base, heightAt(tx + dx, ty));
           if (bottom >= height) continue;
           verticalSide(tx, ty, bottom, height, tx, ty, dx, 0,
-                       [dx < 0 ? -1 : 1, 0, 0], SURFACE_WALL, 1, component.base);
+                       [dx < 0 ? -1 : 1, 0, 0], MATERIAL_NEUTRAL_BUILDING,
+                       1, component.base, component.sideMaterial);
         }
         for (const dy of [-1, 1]) {
           if (sameRoof(tx, ty + dy, component.id)) continue;
@@ -1274,7 +1341,8 @@ class WebGpuPresenter {
           const bottom = Math.max(component.base, heightAt(tx, ty + dy));
           if (bottom >= height) continue;
           verticalSide(tx, ty, bottom, height, tx, ty, 0, dy,
-                       [0, 0, dy < 0 ? -1 : 1], SURFACE_WALL, 1, component.base);
+                       [0, 0, dy < 0 ? -1 : 1], MATERIAL_NEUTRAL_BUILDING,
+                       1, component.base, component.sideMaterial);
         }
       }
     }
@@ -1700,7 +1768,7 @@ class WebGpuPresenter {
     if (enhanced) {
       this.writeTexture(this.worldTexture, worldPixels, this.worldWidth, this.worldHeight);
       const vertexCount = this.buildTerrain(
-        worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels,
+        worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldPixels,
         worldGridOffsetX, worldGridOffsetY,
       );
       const billboardVertexCounts = this.buildFrameLayers(
