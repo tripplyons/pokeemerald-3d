@@ -844,3 +844,11 @@
 26976 button right off
 26977 screenshot frontier-pokemon-center-edge-walked
 26977 probe state
+
+# Lounge 9: authored warp entrance on a structure that lacks a reliable
+# door-course marker in the wall art.
+26978 warp 26 14 21 45
+27178 screenshot frontier-lounge9-warp-entrance
+27178 probe state
+27178 probe map-grid
+27178 probe hd2d-courses

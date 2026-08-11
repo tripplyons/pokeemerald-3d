@@ -925,6 +925,7 @@ struct HdMapSample
     const struct MapLayout *layout;
     u16 metatileId;
     u8 collision;
+    bool8 hasWarpEntrance;
     bool8 valid;
 };
 
@@ -961,7 +962,7 @@ struct HdBuilding
     u16 componentId;
     s8 base;
     s8 roofHeight;
-    bool8 hasDoor;
+    bool8 hasEntrance;
     bool8 truncated;
 };
 
@@ -1040,6 +1041,23 @@ static const u8 *HdTilesetPixels(const struct Tileset *tileset)
     return cache->tiles;
 }
 
+static bool8 HdMapHeaderHasWarpAt(const struct MapHeader *header, s32 x, s32 y)
+{
+    const struct MapEvents *events;
+
+    if (header == NULL || header->events == NULL || header->events->warps == NULL)
+        return FALSE;
+    events = header->events;
+    for (u32 i = 0; i < events->warpCount; i++)
+    {
+        const struct WarpEvent *warp = &events->warps[i];
+
+        if (warp->x == x && warp->y == y)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
 {
     const struct MapLayout *current = gMapHeader.mapLayout;
@@ -1048,6 +1066,7 @@ static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
 
     sample->layout = current;
     sample->collision = 0;
+    sample->hasWarpEntrance = FALSE;
     sample->valid = FALSE;
     if (localX >= 0 && localY >= 0 && localX < current->width && localY < current->height)
     {
@@ -1067,6 +1086,7 @@ static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
             sample->metatileId = UNPACK_METATILE(block);
             sample->collision = UNPACK_COLLISION(block);
         }
+        sample->hasWarpEntrance = HdMapHeaderHasWarpAt(&gMapHeader, localX, localY);
         sample->valid = TRUE;
         return TRUE;
     }
@@ -1110,6 +1130,7 @@ static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
                 sample->layout = layout;
                 sample->metatileId = UNPACK_METATILE(block);
                 sample->collision = UNPACK_COLLISION(block);
+                sample->hasWarpEntrance = HdMapHeaderHasWarpAt(header, x, y);
                 sample->valid = TRUE;
                 return TRUE;
             }
@@ -1678,13 +1699,18 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
             sHdBuildings[building].componentId = 0;
             sHdBuildings[building].base = sHdCourseGroundHeights[supportCourse];
             sHdBuildings[building].roofHeight = roofHeight;
-            sHdBuildings[building].hasDoor = FALSE;
+            sHdBuildings[building].hasEntrance = FALSE;
             sHdBuildings[building].truncated = spanStart == 0 || spanEnd + 1 == sampleCols;
 
             for (u32 wallY = wallTop; wallY <= y; wallY++)
             {
                 for (u32 wallX = spanStart; wallX <= spanEnd; wallX++)
-                    sHdBuildings[building].hasDoor |= HdMapSampleIsDoorCourse(wallY * sampleCols + wallX);
+                {
+                    const u32 sample = wallY * sampleCols + wallX;
+
+                    sHdBuildings[building].hasEntrance |= HdMapSampleIsDoorCourse(sample)
+                                                       || sHdMapSamples[sample].hasWarpEntrance;
+                }
             }
             for (u32 courseY = wallStartCourse; courseY < wallEndCourse; courseY++)
             {
@@ -1698,14 +1724,15 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
     }
 
     // Touching, height-compatible roof/facade bands have already been unioned
-    // while claimed. Only now require one semantic door for the whole connected
-    // building and reject roots clipped by either semantic or atlas boundary.
+    // while claimed. Only now require one semantic entrance for the whole
+    // connected building and reject roots clipped by either semantic or atlas
+    // boundary.
     for (u16 building = 0; building < sHdBuildingCount; building++)
     {
         const u16 root = HdFindBuilding(building);
         if (root != building)
         {
-            sHdBuildings[root].hasDoor |= sHdBuildings[building].hasDoor;
+            sHdBuildings[root].hasEntrance |= sHdBuildings[building].hasEntrance;
             sHdBuildings[root].truncated |= sHdBuildings[building].truncated;
         }
     }
@@ -1721,7 +1748,7 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
             if (owner < 0)
                 continue;
             root = HdFindBuilding(owner);
-            if (!sHdBuildings[root].hasDoor || sHdBuildings[root].truncated)
+            if (!sHdBuildings[root].hasEntrance || sHdBuildings[root].truncated)
                 continue;
             if (sHdBuildings[root].componentId == 0)
             {
