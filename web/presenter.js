@@ -575,6 +575,8 @@ class WebGpuPresenter {
     this.terrainRows = 0;
     this.terrainOriginX = 0;
     this.terrainOriginY = 0;
+    this.terrainSignature = null;
+    this.terrainVertexCount = 0;
     this.sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest', mipmapFilter: 'nearest' });
     this.createPipelines();
     this.resize(scale);
@@ -797,6 +799,9 @@ class WebGpuPresenter {
     const originY = gridOffsetY - TILE_SIZE;
     const cols = Math.ceil((this.worldWidth - originX) / TILE_SIZE);
     const rows = Math.ceil((this.worldHeight - originY) / TILE_SIZE);
+    let unchanged = this.terrainSignature !== null
+      && this.terrainCols === cols && this.terrainRows === rows
+      && this.terrainOriginX === originX && this.terrainOriginY === originY;
     this.terrainCols = cols;
     this.terrainRows = rows;
     this.terrainOriginX = originX;
@@ -804,17 +809,31 @@ class WebGpuPresenter {
     const heights = this.tileHeights;
     const groundHeights = this.tileGroundHeights;
     const geometry = this.tileGeometry;
+    let signature = 2166136261;
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
         const pixelX = Math.max(0, Math.min(this.worldWidth - 1, originX + tx * TILE_SIZE + TILE_SIZE / 2));
         const pixelY = Math.max(0, Math.min(this.worldHeight - 1, originY + ty * TILE_SIZE + TILE_SIZE / 2));
         const source = Math.floor(pixelY) * this.worldWidth + Math.floor(pixelX);
         const tile = ty * cols + tx;
-        heights[tile] = worldHeights[source];
-        groundHeights[tile] = worldGroundHeights[source];
-        geometry[tile] = worldGeometry[source];
+        const height = worldHeights[source];
+        const groundHeight = worldGroundHeights[source];
+        const geometryWord = worldGeometry[source];
+        if (unchanged && (heights[tile] !== height
+            || groundHeights[tile] !== groundHeight || geometry[tile] !== geometryWord))
+          unchanged = false;
+        heights[tile] = height;
+        groundHeights[tile] = groundHeight;
+        geometry[tile] = geometryWord;
+        signature = Math.imul(signature ^ (height & 0xff), 16777619);
+        signature = Math.imul(signature ^ (groundHeight & 0xff), 16777619);
+        signature = Math.imul(signature ^ geometryWord, 16777619);
       }
     }
+    signature >>>= 0;
+    // Exact sampled-value comparisons make hash collisions harmless. Reusing
+    // this mesh also preserves the matching component/facade bounds.
+    if (unchanged && signature === this.terrainSignature) return this.terrainVertexCount;
 
     const vertices = [];
     const pushVertex = (x, y, z, u, v, shade, shell, base) =>
@@ -1091,7 +1110,9 @@ class WebGpuPresenter {
       this.vertexBuffer = this.device.createBuffer({ label: 'projected terrain mesh', size: this.vertexCapacity, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     }
     this.device.queue.writeBuffer(this.vertexBuffer, 0, data);
-    return data.length / VERTEX_FLOATS;
+    this.terrainSignature = signature;
+    this.terrainVertexCount = data.length / VERTEX_FLOATS;
+    return this.terrainVertexCount;
   }
 
   terrainHeightAt(x, z) {
