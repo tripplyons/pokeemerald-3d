@@ -324,11 +324,6 @@ struct FragmentOutput {
   @builtin(frag_depth) depth: f32,
 }
 
-struct SilhouetteOutput {
-  @location(0) color: vec4f,
-  @location(1) focusDepth: f32,
-}
-
 fn objectColor(input: VertexOutput) -> vec4f {
   let dest = vec2i(floor(input.uv));
   var source = dest;
@@ -360,26 +355,11 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
 
   let color = objectColor(input);
   if (color.a <= 0.0) { discard; }
+  if (occluded) { discard; }
   var output: FragmentOutput;
-  if (occluded) {
-    // Preserve a readable whole-entity silhouette through overhead terrain
-    // instead of slicing the billboard into disconnected visible fragments.
-    output.color = vec4f(mix(color.rgb, vec3f(0.72, 0.88, 0.92), 0.24), color.a * 0.62);
-  } else {
-    output.color = color;
-  }
+  output.color = color;
   output.focusDepth = input.cameraDepth;
   output.depth = input.position.z;
-  return output;
-}
-
-@fragment
-fn fragmentSilhouette(input: VertexOutput) -> SilhouetteOutput {
-  let color = objectColor(input);
-  if (color.a <= 0.0) { discard; }
-  var output: SilhouetteOutput;
-  output.color = vec4f(mix(color.rgb, vec3f(0.72, 0.88, 0.92), 0.24), color.a * 0.62);
-  output.focusDepth = input.cameraDepth;
   return output;
 }
 `;
@@ -815,20 +795,6 @@ class WebGpuPresenter {
         { binding: 1, resource: this.bgPriorityTexture.createView() },
       ],
     });
-    this.actorSilhouettePipeline = device.createRenderPipeline({
-      label: 'whole-actor building occlusion silhouettes', layout: 'auto',
-      vertex: billboardVertex,
-      fragment: { module: billboardModule, entryPoint: 'fragmentSilhouette', targets: [{
-        format: 'rgba8unorm', blend: billboardBlend,
-      }, { format: 'r32float' }] },
-      primitive: { topology: 'triangle-list' },
-    });
-    this.actorSilhouetteBindGroup = device.createBindGroup({
-      layout: this.actorSilhouettePipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: this.objectTexture.createView({ dimension: '2d-array' }) },
-      ],
-    });
-
     const cinematicModule = device.createShaderModule({ label: 'cinematic HD-2D shader', code: CINEMATIC_SHADER });
     this.cinematicPipeline = device.createRenderPipeline({
       label: 'cinematic bloom, focus, and vignette', layout: 'auto',
@@ -1428,44 +1394,6 @@ class WebGpuPresenter {
     };
   }
 
-  actorOccludedByShell(actor, tilt, zoom) {
-    // Route the complete owning actor only when its grouped projected cards
-    // actually cover a shell. World X/Z alone made separated cards become
-    // false whole-body silhouettes near a building's footprint.
-    for (const component of this.buildingComponents) {
-      const overlapsWorldX = actor.worldX1 > component.x0 && actor.worldX0 < component.x1;
-      // The facade's source footprint remains its doorway/front transition
-      // zone even though the physical plane is now at its south boundary.
-      // Only actors north of that footprint are genuinely under/behind roof.
-      const behindRoof = actor.footZ < component.occlusionZ - 0.5;
-      if (!overlapsWorldX || !behindRoof) continue;
-
-      const bounds = {
-        x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity,
-        nearDepth: Infinity,
-      };
-      for (const x of [component.x0, component.x1]) {
-        for (const y of [component.base, component.roofHeight]) {
-          for (const z of [component.minZ, component.frontZ]) {
-            // Match the terrain shader exactly when testing projected overlap.
-            const point = this.cameraProjection(x, y, z, tilt, zoom);
-            bounds.x0 = Math.min(bounds.x0, point.x);
-            bounds.x1 = Math.max(bounds.x1, point.x);
-            bounds.y0 = Math.min(bounds.y0, point.y);
-            bounds.y1 = Math.max(bounds.y1, point.y);
-            bounds.nearDepth = Math.min(bounds.nearDepth, point.cameraDepth);
-          }
-        }
-      }
-      const overlapsProjection = actor.screenX1 > bounds.x0 && actor.screenX0 < bounds.x1
-        && actor.screenY1 > bounds.y0 && actor.screenY0 < bounds.y1;
-      const shellIsInFront = actor.cameraDepth > bounds.nearDepth + 0.5;
-      if (!overlapsProjection || !shellIsInFront) continue;
-      return true;
-    }
-    return false;
-  }
-
   measureObjectFootRows(objectDescriptors, objectSourceCount, objectEventSpriteFlags,
                         objectSourcePixels) {
     const footRows = new Float32Array(objectEventSpriteFlags.length);
@@ -1621,69 +1549,12 @@ class WebGpuPresenter {
     // subsprites from one engine sprite share a foot-row projection without
     // accidentally joining touching actors or weather tiles.
     const groupAnchorY = new Int32Array(objectEventSpriteFlags.length);
-    const groupX0 = new Float32Array(objectEventSpriteFlags.length);
-    const groupX1 = new Float32Array(objectEventSpriteFlags.length);
-    const groupScreenX0 = new Float32Array(objectEventSpriteFlags.length);
-    const groupScreenX1 = new Float32Array(objectEventSpriteFlags.length);
-    const groupScreenY0 = new Float32Array(objectEventSpriteFlags.length);
-    const groupScreenY1 = new Float32Array(objectEventSpriteFlags.length);
-    const groupCameraDepth = new Float32Array(objectEventSpriteFlags.length);
     groupAnchorY.fill(-32768);
-    groupX0.fill(Infinity);
-    groupX1.fill(-Infinity);
-    groupScreenX0.fill(Infinity);
-    groupScreenX1.fill(-Infinity);
-    groupScreenY0.fill(Infinity);
-    groupScreenY1.fill(-Infinity);
     for (let index = 0; index < objectSourceCount; index++) {
       const o = index * 16;
       const spriteId = objectDescriptors[o + 10];
       if (spriteId < 0 || spriteId >= groupAnchorY.length) continue;
       groupAnchorY[spriteId] = Math.max(groupAnchorY[spriteId], objectDescriptors[o + 4]);
-      groupX0[spriteId] = Math.min(groupX0[spriteId], objectDescriptors[o + 1] - this.width / 2);
-      groupX1[spriteId] = Math.max(
-        groupX1[spriteId], objectDescriptors[o + 1] + objectDescriptors[o + 7] - this.width / 2,
-      );
-    }
-    // Project every card with its owning group's shared foot so the occlusion
-    // decision uses the same complete billboard bounds that will be emitted.
-    for (let index = 0; index < objectSourceCount; index++) {
-      const o = index * 16;
-      const spriteId = objectDescriptors[o + 10];
-      if (spriteId < 0 || spriteId >= groupAnchorY.length || !objectEventSpriteFlags[spriteId]
-          || groupAnchorY[spriteId] <= -32768) continue;
-      const anchorX = objectDescriptors[o + 3];
-      const anchorY = groupAnchorY[spriteId];
-      const groundX = anchorX - this.width / 2;
-      const groundZ = anchorY - this.height / 2;
-      const projected = this.cameraProjection(
-        groundX, this.terrainGroundHeightAt(groundX, groundZ), groundZ, tilt, zoom,
-      );
-      const x0 = projected.x + (objectDescriptors[o + 1] - anchorX) * projected.scale;
-      const y0 = projected.y + (objectDescriptors[o + 2] - anchorY) * projected.scale;
-      groupScreenX0[spriteId] = Math.min(groupScreenX0[spriteId], x0);
-      groupScreenX1[spriteId] = Math.max(
-        groupScreenX1[spriteId], x0 + objectDescriptors[o + 7] * projected.scale,
-      );
-      groupScreenY0[spriteId] = Math.min(groupScreenY0[spriteId], y0);
-      groupScreenY1[spriteId] = Math.max(
-        groupScreenY1[spriteId], y0 + objectDescriptors[o + 8] * projected.scale,
-      );
-      groupCameraDepth[spriteId] = Math.max(groupCameraDepth[spriteId], projected.cameraDepth);
-    }
-    const shellOccludedGroups = new Uint8Array(objectEventSpriteFlags.length);
-    for (let spriteId = 0; spriteId < shellOccludedGroups.length; spriteId++) {
-      if (!objectEventSpriteFlags[spriteId] || groupAnchorY[spriteId] <= -32768) continue;
-      shellOccludedGroups[spriteId] = this.actorOccludedByShell(
-        {
-          worldX0: groupX0[spriteId], worldX1: groupX1[spriteId],
-          footZ: groupAnchorY[spriteId] - this.height / 2,
-          screenX0: groupScreenX0[spriteId], screenX1: groupScreenX1[spriteId],
-          screenY0: groupScreenY0[spriteId], screenY1: groupScreenY1[spriteId],
-          cameraDepth: groupCameraDepth[spriteId],
-        },
-        tilt, zoom,
-      );
     }
 
     const order = Array.from({ length: objectSourceCount }, (_, index) => index);
@@ -1693,7 +1564,6 @@ class WebGpuPresenter {
         || objectDescriptors[bo] - objectDescriptors[ao];
     });
     const normalVertices = [];
-    const silhouetteVertices = [];
     const vertex = (vertices, x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
                     affine, pa, pb, pc, pd, screenX, screenY, oamId, priority, cameraDepth) =>
       vertices.push(x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
@@ -1725,31 +1595,22 @@ class WebGpuPresenter {
       const x1 = x0 + drawW * projected.scale;
       const y0 = projected.y + (screenY - anchorY) * projected.scale;
       const y1 = y0 + drawH * projected.scale;
-      const isActor = spriteId >= 0 && spriteId < objectEventSpriteFlags.length
-        && objectEventSpriteFlags[spriteId];
-      // Shell-occluded actors move as complete owning groups to the silhouette
-      // pass. All other cards retain native per-pixel BG priority behavior.
-      const vertices = isActor && shellOccludedGroups[spriteId]
-        ? silhouetteVertices : normalVertices;
       const extra = [0, layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd,
                      screenX, screenY, oamId, priority, projected.cameraDepth];
       for (const point of [
         [x0,y0,0,0], [x1,y0,drawW,0], [x1,y1,drawW,drawH],
         [x0,y0,0,0], [x1,y1,drawW,drawH], [x0,y1,0,drawH],
-      ]) vertex(vertices, point[0], point[1], point[2], point[3], ...extra);
+      ]) vertex(normalVertices, point[0], point[1], point[2], point[3], ...extra);
     }
 
-    const data = new Float32Array([...normalVertices, ...silhouetteVertices]);
+    const data = new Float32Array(normalVertices);
     if (data.byteLength > this.billboardVertexCapacity) {
       this.billboardVertexBuffer.destroy();
       this.billboardVertexCapacity = 2 ** Math.ceil(Math.log2(data.byteLength));
       this.billboardVertexBuffer = this.device.createBuffer({ label: 'high-resolution billboard quads', size: this.billboardVertexCapacity, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     }
     if (data.byteLength) this.device.queue.writeBuffer(this.billboardVertexBuffer, 0, data);
-    return {
-      normal: normalVertices.length / BILLBOARD_VERTEX_FLOATS,
-      silhouette: silhouetteVertices.length / BILLBOARD_VERTEX_FLOATS,
-    };
+    return normalVertices.length / BILLBOARD_VERTEX_FLOATS;
   }
 
   writeTexture(texture, pixels, width = this.width, height = this.height, bytesPerPixel = 4) {
@@ -1775,7 +1636,7 @@ class WebGpuPresenter {
         worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldPixels,
         worldGridOffsetX, worldGridOffsetY,
       );
-      const billboardVertexCounts = this.buildFrameLayers(
+      const billboardVertexCount = this.buildFrameLayers(
         finalPixels, layerPixels, objectIds, objectPixels, objectPriorities,
         objectDescriptors, objectEventSpriteFlags, objectSourceCount, perspective, zoom,
       );
@@ -1836,17 +1697,6 @@ class WebGpuPresenter {
       });
       castShadowCompositePass.setPipeline(this.castShadowCompositePipeline); castShadowCompositePass.setBindGroup(0, this.castShadowCompositeBindGroup); castShadowCompositePass.draw(3); castShadowCompositePass.end();
 
-      if (billboardVertexCounts.silhouette) {
-        const actorSilhouettePass = encoder.beginRenderPass({
-          label: 'whole-actor building occlusion silhouette pass',
-          colorAttachments: [
-            { view: this.sceneTexture.createView(), loadOp: 'load', storeOp: 'store' },
-            { view: this.focusDepthTexture.createView(), loadOp: 'load', storeOp: 'store' },
-          ],
-        });
-        actorSilhouettePass.setPipeline(this.actorSilhouettePipeline); actorSilhouettePass.setBindGroup(0, this.actorSilhouetteBindGroup); actorSilhouettePass.setVertexBuffer(0, this.billboardVertexBuffer); actorSilhouettePass.draw(billboardVertexCounts.silhouette, 1, billboardVertexCounts.normal); actorSilhouettePass.end();
-      }
-
       const billboardPass = encoder.beginRenderPass({
         label: 'upright billboard pass',
         colorAttachments: [
@@ -1855,7 +1705,7 @@ class WebGpuPresenter {
         ],
         depthStencilAttachment: { view: this.depthTexture.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
       });
-      billboardPass.setPipeline(this.billboardPipeline); billboardPass.setBindGroup(0, this.billboardBindGroup); billboardPass.setVertexBuffer(0, this.billboardVertexBuffer); billboardPass.draw(billboardVertexCounts.normal); billboardPass.end();
+      billboardPass.setPipeline(this.billboardPipeline); billboardPass.setBindGroup(0, this.billboardBindGroup); billboardPass.setVertexBuffer(0, this.billboardVertexBuffer); billboardPass.draw(billboardVertexCount); billboardPass.end();
 
       // Apply shared focus-depth optics to the complete world scene so actors
       // integrate with terrain instead of appearing pasted over the diorama.
