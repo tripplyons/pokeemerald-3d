@@ -1807,6 +1807,7 @@ function automationApi() {
       zoom: zoomStrength,
       optics: opticsStrength,
     }, false, animate),
+    startNewGame: () => instance.exports.WasmStartNewGameForAutomation(),
     warp: automationWarp,
     runToFrame,
     screenshot: async () => { await presenter.ready(); return canvas.toDataURL('image/png'); },

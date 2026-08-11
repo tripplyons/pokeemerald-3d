@@ -12,7 +12,7 @@ const defaultOutputDir = 'wasm-replay-output';
 function usage() {
   console.error('usage: node tools/wasm_replay.mjs <events.txt> [output-dir] [--no-build] [--keep-browser] [--view=classic|hd2d] [--shading=0..1] [--zoom=0..1] [--perspective=0..1] [--optics=0..1] [--render-scale=1|2|3|4|6|8] [--save=path/to/game.sav]');
   console.error('event frame numbers are emulated game frames, not display frames');
-  console.error('events: screenshot [name], button <name> <on|off>, warp <group> <map> <x> <y>, avatar <mode>, running-shoes <on|off>, weather <0..15>, view <classic|hd2d>, gpu-loss, probe <name>');
+  console.error('events: screenshot [name], button <name> <on|off>, new-game, warp <group> <map> <x> <y>, avatar <mode>, running-shoes <on|off>, weather <0..15>, view <classic|hd2d>, gpu-loss, probe <name>');
   process.exit(2);
 }
 
@@ -94,6 +94,12 @@ function parseEvents(text) {
       if (values.length !== 4 || values.some((value) => !Number.isInteger(value)))
         throw new Error(`${index + 1}: expected "<frame> warp <group> <map> <x> <y>"`);
       events.push({ frame, type: 'warp', mapGroup: values[0], mapNum: values[1], x: values[2], y: values[3] });
+      continue;
+    }
+
+    if (fields[1] === 'new-game') {
+      if (fields.length !== 2) throw new Error(`${index + 1}: expected "<frame> new-game"`);
+      events.push({ frame, type: 'new-game' });
       continue;
     }
 
@@ -402,6 +408,8 @@ async function main() {
         await evaluate(cdp, `window.pokeemerald.automation.setButton(${JSON.stringify(event.name)}, ${event.pressed})`);
       } else if (event.type === 'warp') {
         await evaluate(cdp, `window.pokeemerald.automation.warp(${event.mapGroup}, ${event.mapNum}, ${event.x}, ${event.y})`);
+      } else if (event.type === 'new-game') {
+        await evaluate(cdp, `window.pokeemerald.automation.startNewGame()`);
       } else if (event.type === 'avatar') {
         await evaluate(cdp, `window.pokeemerald.automation.setAvatar(${JSON.stringify(event.mode)})`);
       } else if (event.type === 'weather') {

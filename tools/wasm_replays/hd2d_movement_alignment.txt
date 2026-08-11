@@ -1,0 +1,299 @@
+# Deterministic HD-2D movement, collision, door, seam, and camera alignment coverage.
+# Run this same route at --perspective=.25, .50, and .75; use --view=classic as
+# the unprojected movement/collision reference. Screenshots intentionally land
+# before, during, and after held inputs so sub-tile camera scrolling is visible.
+# Encounters are disabled so movement timing does not depend on the RNG.
+
+# Littleroot: rival-house door alignment, exterior wall collision, and the two
+# houses used by the moving-truck introduction (the starting house is tested too).
+0 new-game
+1 encounters off
+1 running-shoes off
+1 warp 0 9 14 10
+180 screenshot littleroot-rival-door-before
+180 probe state
+180 probe map-grid
+180 probe object-descriptors
+180 probe object-events
+181 button up on
+186 screenshot littleroot-rival-door-during
+186 probe state
+241 button up off
+341 screenshot littleroot-rival-house-inside
+341 probe state
+341 probe map-grid
+341 probe object-descriptors
+341 probe object-events
+342 button down on
+347 screenshot littleroot-rival-exit-during
+422 button down off
+522 screenshot littleroot-rival-door-after-exit
+522 probe state
+523 warp 0 9 9 9
+703 screenshot littleroot-houses-front-before
+704 button right on
+709 screenshot littleroot-house-wall-collision-during
+709 probe state
+784 button right off
+884 screenshot littleroot-house-wall-collision-after
+884 probe state
+885 warp 1 0 4 7
+1065 screenshot moving-truck-house-inside-before
+1065 probe state
+1065 probe map-grid
+1065 probe object-descriptors
+1065 probe object-events
+1066 button right on
+1071 screenshot moving-truck-house-inside-scroll
+1130 button right off
+1131 button down on
+1195 button down off
+1295 screenshot moving-truck-house-door-exterior
+1295 probe state
+1295 probe map-grid
+
+# Oldale: approach and enter House 1, then exit and press against its facade.
+1296 warp 0 10 5 10
+1476 screenshot oldale-house-door-before
+1476 probe state
+1476 probe map-grid
+1477 button up on
+1482 screenshot oldale-house-door-during
+1482 probe state
+1557 button up off
+1657 screenshot oldale-house-inside
+1657 probe state
+1657 probe object-events
+1658 button down on
+1738 button down off
+1838 screenshot oldale-house-after-exit
+1838 probe state
+1839 button left on
+1844 screenshot oldale-building-edge-during
+1919 button left off
+2019 screenshot oldale-building-edge-after
+2019 probe state
+
+# Verdanturf: building facade collision and the connected Route 117 seam.
+2020 warp 0 14 12 6
+2200 screenshot verdanturf-mart-approach-before
+2200 probe state
+2200 probe map-grid
+2200 probe object-descriptors
+2201 button up on
+2206 screenshot verdanturf-mart-approach-during
+2261 button up off
+2361 screenshot verdanturf-mart-edge-after
+2361 probe state
+2362 warp 0 14 18 10
+2542 screenshot verdanturf-route117-seam-before
+2542 probe state
+2542 probe object-events
+2543 button right on
+2552 screenshot verdanturf-route117-seam-during
+2552 probe state
+2639 button right off
+2739 screenshot verdanturf-route117-seam-after
+2739 probe state
+2739 probe map-grid
+2739 probe object-descriptors
+2739 probe object-events
+
+# Fortree: tree-house deck travel, house door entry/exit, and collision anchoring.
+# House 1 is used because the Gym entrance is story-gated by the invisible Kecleon.
+2740 warp 0 4 10 6
+2920 screenshot fortree-house-door-before
+2920 probe state
+2920 probe map-grid
+2920 probe object-descriptors
+2920 probe object-events
+2921 button up on
+2926 screenshot fortree-house-door-during
+3001 button up off
+3121 screenshot fortree-house-inside
+3121 probe state
+3121 probe map-grid
+3121 probe object-descriptors
+3121 probe object-events
+3122 button down on
+3130 screenshot fortree-house-exit-during
+3202 button down off
+3302 screenshot fortree-house-door-after-exit
+3302 probe state
+3483 screenshot fortree-deck-before
+3484 button down on
+3489 screenshot fortree-deck-scroll-during
+3489 probe state
+3580 button down off
+3680 screenshot fortree-deck-collision-after
+3680 probe state
+3680 probe object-descriptors
+
+# Pacifidlog: stilt-house door alignment and walkable logs/decks over water.
+3681 warp 0 15 16 16
+3861 screenshot pacifidlog-house-door-before
+3861 probe state
+3861 probe map-grid
+3861 probe object-descriptors
+3861 probe object-events
+3862 button up on
+3867 screenshot pacifidlog-house-door-during
+3942 button up off
+4042 screenshot pacifidlog-house-inside
+4042 probe state
+4042 probe object-events
+4043 button down on
+4123 button down off
+4223 screenshot pacifidlog-house-after-exit
+4223 probe state
+4224 warp 0 15 10 20
+4404 screenshot pacifidlog-deck-before
+4405 button right on
+4410 screenshot pacifidlog-deck-scroll-during
+4410 probe state
+4501 button right off
+4601 screenshot pacifidlog-deck-water-collision-after
+4601 probe state
+4601 probe map-grid
+4601 probe object-descriptors
+
+# Route 119: Weather Institute facade, riverbank collision, and Fortree edge.
+4602 warp 0 34 6 35
+4782 screenshot route119-institute-door-before
+4782 probe state
+4782 probe map-grid
+4782 probe object-descriptors
+4782 probe object-events
+4783 button up on
+4788 screenshot route119-institute-door-during
+4863 button up off
+4963 screenshot route119-institute-inside
+4963 probe state
+4963 probe object-events
+4964 button down on
+5044 button down off
+5144 screenshot route119-institute-after-exit
+5144 probe state
+5145 warp 0 34 27 70
+5325 screenshot route119-riverbank-before
+5326 button left on
+5331 screenshot route119-riverbank-during
+5331 probe state
+5422 button left off
+5522 screenshot route119-water-edge-collision-after
+5522 probe state
+5522 probe map-grid
+5523 warp 0 34 38 14
+5703 screenshot route119-fortree-edge-before
+5704 button right on
+5713 screenshot route119-fortree-edge-during
+5713 probe state
+5800 button right off
+5900 screenshot route119-fortree-edge-after
+5900 probe state
+5900 probe map-grid
+5900 probe object-descriptors
+5900 probe object-events
+
+# Route 120: Fortree edge in the opposite direction and tall-grass/ledge terrain.
+5901 warp 0 35 1 14
+6081 screenshot route120-fortree-edge-before
+6081 probe state
+6081 probe map-grid
+6082 button left on
+6091 screenshot route120-fortree-edge-during
+6091 probe state
+6178 button left off
+6278 screenshot route120-fortree-edge-after
+6278 probe state
+6278 probe object-events
+6279 warp 0 35 20 50
+6459 screenshot route120-tall-grass-ledge-before
+6459 probe state
+6459 probe map-grid
+6459 probe object-descriptors
+6460 button down on
+6465 screenshot route120-tall-grass-ledge-during
+6465 probe state
+6556 button down off
+6656 screenshot route120-tall-grass-ledge-after
+6656 probe state
+6656 probe map-grid
+
+# User-reported Battle Frontier views: Exchange Service Corner entrance/interior,
+# its indoor actor/counter positioning, and the west/east map seam between the
+# Mart and Pokémon Center. These checkpoints reproduce the three supplied views.
+6657 warp 26 14 10 31
+6837 screenshot frontier-exchange-entrance-before
+6837 probe state
+6837 probe map-grid
+6837 probe object-descriptors
+6837 probe object-events
+6838 button up on
+6843 screenshot frontier-exchange-entrance-during
+6918 button up off
+7038 screenshot frontier-exchange-counter-inside
+7038 probe state
+7038 probe map-grid
+7038 probe object-descriptors
+7038 probe object-events
+7039 button up on
+7044 screenshot frontier-exchange-counter-scroll
+7119 button up off
+7219 screenshot frontier-exchange-counter-edge
+7219 probe state
+7220 button down on
+7300 button down off
+7400 screenshot frontier-exchange-after-exit
+7400 probe state
+7401 warp 26 4 54 51
+7581 screenshot frontier-mart-pokecenter-seam-before
+7581 probe state
+7581 probe map-grid
+7581 probe object-descriptors
+7581 probe object-events
+7582 button right on
+7591 screenshot frontier-mart-pokecenter-seam-during
+7591 probe state
+7678 button right off
+7778 screenshot frontier-pokecenter-entrance-after-seam
+7778 probe state
+7778 probe map-grid
+7778 probe object-descriptors
+7778 probe object-events
+7779 warp 26 14 3 54
+7959 screenshot frontier-pokecenter-door-before
+7960 button up on
+7965 screenshot frontier-pokecenter-door-during
+8040 button up off
+8160 screenshot frontier-pokecenter-inside
+8160 probe state
+8160 probe map-grid
+8160 probe object-descriptors
+8160 probe object-events
+8161 button down on
+8241 button down off
+8341 screenshot frontier-pokecenter-after-exit
+8341 probe state
+
+# Start a clean game directly at the moving-truck field sequence. This catches
+# player/box anchors during the scripted shake and the starting-house door exit.
+8342 new-game
+8402 screenshot moving-truck-scripted-motion
+8402 probe state
+8402 probe map-grid
+8402 probe object-descriptors
+8402 probe object-events
+9242 screenshot moving-truck-player-control-before
+9243 button down on
+9252 screenshot moving-truck-player-scroll-during
+9483 button down off
+9503 button right on
+9583 button right off
+9603 button down on
+9723 button down off
+9843 screenshot moving-truck-house-after-exit
+9843 probe state
+9843 probe map-grid
+9843 probe object-descriptors
+9843 probe object-events

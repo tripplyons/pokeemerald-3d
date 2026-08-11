@@ -46,6 +46,12 @@ extern void WasmApplyTilesetAnimations(const struct Tileset *tileset, u8 *dest, 
 #define OBJECT_DESCRIPTOR_WORDS 16
 #define OAM_ENTRY_COUNT 128
 
+void WasmStartNewGameForAutomation(void)
+{
+    gMain.state = 0;
+    CB2_NewGame();
+}
+
 enum HdSurface
 {
     HD_SURFACE_GROUND,
