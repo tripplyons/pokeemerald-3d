@@ -1034,11 +1034,11 @@ static const u8 *HdTilesetPixels(const struct Tileset *tileset)
     return cache->tiles;
 }
 
-static bool8 ResolveHdMapSample(s32 localX, s32 localY, struct HdMapSample *sample)
+static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
 {
     const struct MapLayout *current = gMapHeader.mapLayout;
-    const s32 gridX = localX + MAP_OFFSET;
-    const s32 gridY = localY + MAP_OFFSET;
+    const s32 localX = mapX - MAP_OFFSET;
+    const s32 localY = mapY - MAP_OFFSET;
 
     sample->layout = current;
     sample->collision = 0;
@@ -1047,14 +1047,14 @@ static bool8 ResolveHdMapSample(s32 localX, s32 localY, struct HdMapSample *samp
     {
         u16 block = MAPGRID_UNDEFINED;
 
-        if (gridX >= 0 && gridY >= 0
-         && gridX < gBackupMapLayout.width && gridY < gBackupMapLayout.height)
-            block = gBackupMapLayout.map[gridY * gBackupMapLayout.width + gridX];
+        if (mapX >= 0 && mapY >= 0
+         && mapX < gBackupMapLayout.width && mapY < gBackupMapLayout.height)
+            block = gBackupMapLayout.map[mapY * gBackupMapLayout.width + mapX];
 
         if (block == MAPGRID_UNDEFINED)
         {
-            sample->metatileId = MapGridGetMetatileIdAt(gridX, gridY);
-            sample->collision = MapGridGetCollisionAt(gridX, gridY);
+            sample->metatileId = MapGridGetMetatileIdAt(mapX, mapY);
+            sample->collision = MapGridGetCollisionAt(mapX, mapY);
         }
         else
         {
@@ -1109,8 +1109,8 @@ static bool8 ResolveHdMapSample(s32 localX, s32 localY, struct HdMapSample *samp
             }
         }
     }
-    sample->metatileId = MapGridGetMetatileIdAt(gridX, gridY);
-    sample->collision = MapGridGetCollisionAt(gridX, gridY);
+    sample->metatileId = MapGridGetMetatileIdAt(mapX, mapY);
+    sample->collision = MapGridGetCollisionAt(mapX, mapY);
     return FALSE;
 }
 
@@ -1449,13 +1449,12 @@ static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
         return HD_SURFACE_WATER;
     if (HdMapSampleIsTerrainCourse(index, sampleX, sampleY, sampleCols))
         return HD_SURFACE_TERRAIN;
-    // A generic obstacle needs a complete authored top plane. Partially
-    // transparent art has no independent alpha mask in the terrain texture;
-    // raising either the whole metatile or only its occupied quadrants lifts
-    // visible pavement and water or fragments one object into separate slabs.
+    // Only cells with top-plane art obstruct. Bottom-plane-only collision
+    // tiles (border hedges, fences) render flat in the classic view, so
+    // extruding them as obstacles produces spurious side faces that sample
+    // adjacent pavement instead of their own art.
     if (sample->collision
-     && HdMetatileCoverage(sample, 1)
-        == 4 * HD2D_TILE_WIDTH * HD2D_TILE_WIDTH)
+     && HdMetatileCoverage(sample, 1) != 0)
         return HD_SURFACE_OBSTACLE;
     return HD_SURFACE_GROUND;
 }
