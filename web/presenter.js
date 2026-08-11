@@ -38,6 +38,7 @@ struct Camera {
 }
 @group(0) @binding(0) var sceneTexture: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> camera: Camera;
+@group(0) @binding(2) var focusDepthTexture: texture_2d<f32>;
 
 fn loadScene(pixel: vec2i, size: vec2i) -> vec3f {
   return textureLoad(sceneTexture, clamp(pixel, vec2i(0), size - 1), 0).rgb;
@@ -56,49 +57,72 @@ fn screenHash(point: vec2f) -> f32 {
   return fract(sin(dot(point, vec2f(12.9898, 78.233))) * 43758.5453);
 }
 
+struct FocusSamples {
+  color: vec3f,
+  bloom: vec3f,
+  weight: f32,
+}
+
+fn focusSample(pixel: vec2i, centerDepth: f32, size: vec2i) -> FocusSamples {
+  let clampedPixel = clamp(pixel, vec2i(0), size - 1);
+  let color = textureLoad(sceneTexture, clampedPixel, 0).rgb;
+  let depth = textureLoad(focusDepthTexture, clampedPixel, 0).r;
+  // Nearby samples on the same projected surface remain eligible, while
+  // geometry across a depth discontinuity cannot tint the center fragment.
+  let weight = 1.0 - smoothstep(10.0, 34.0, abs(depth - centerDepth));
+  return FocusSamples(color, highlight(color), weight);
+}
+
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let size = vec2i(textureDimensions(sceneTexture));
   let uv = clamp(input.uv, vec2f(0.0), vec2f(0.99999));
   let pixel = clamp(vec2i(uv * vec2f(size)), vec2i(0), size - 1);
   let base = loadScene(pixel, size);
+  let centerDepth = textureLoad(focusDepthTexture, pixel, 0).r;
   let renderScale = max(f32(size.x) / 240.0, 1.0);
   let centered = uv * 2.0 - vec2f(1.0);
 
-  // HD-2D tilt-shift: keep the playable middle plane crisp while the far and
-  // near edges fall gently out of focus. The radius scales with output size,
-  // so the effect describes world detail rather than display pixels.
-  let focusDistance = abs(uv.y - 0.53);
+  // Focus follows physical camera-space depth, not screen position or the
+  // nonlinear depth buffer used for raster occlusion. The playable plane at
+  // camera height remains crisp as geometry in front of and behind it falls
+  // out of focus. Radius scales with output size, describing world detail.
+  let focusDistance = abs(centerDepth - camera.values.w);
   let radialDistance = length(centered * vec2f(0.82, 1.0));
-  let blurAmount = max(
-    smoothstep(0.23, 0.52, focusDistance),
-    0.45 * smoothstep(0.68, 1.12, radialDistance)
+  let blurAmount = camera.world.z * max(
+    smoothstep(30.0, 118.0, focusDistance),
+    0.20 * smoothstep(0.78, 1.15, radialDistance)
   );
   let radius = max(1, i32(ceil(renderScale * (0.75 + 1.35 * blurAmount))));
   let horizontal = vec2i(radius, 0);
   let vertical = vec2i(0, radius);
   let diagonal = vec2i(radius, radius);
-  let ring = (
-    loadScene(pixel - horizontal, size) + loadScene(pixel + horizontal, size)
-    + loadScene(pixel - vertical, size) + loadScene(pixel + vertical, size)
-    + loadScene(pixel - diagonal, size) + loadScene(pixel + diagonal, size)
-    + loadScene(pixel + vec2i(radius, -radius), size)
-    + loadScene(pixel + vec2i(-radius, radius), size)
-  ) * 0.125;
-  var color = mix(base, (2.0 * base + ring) / 3.0, 0.82 * blurAmount);
+  let north = focusSample(pixel - vertical, centerDepth, size);
+  let south = focusSample(pixel + vertical, centerDepth, size);
+  let west = focusSample(pixel - horizontal, centerDepth, size);
+  let east = focusSample(pixel + horizontal, centerDepth, size);
+  let northwest = focusSample(pixel - diagonal, centerDepth, size);
+  let southeast = focusSample(pixel + diagonal, centerDepth, size);
+  let northeast = focusSample(pixel + vec2i(radius, -radius), centerDepth, size);
+  let southwest = focusSample(pixel + vec2i(-radius, radius), centerDepth, size);
+  let acceptedWeight = north.weight + south.weight + west.weight + east.weight
+    + northwest.weight + southeast.weight + northeast.weight + southwest.weight;
+  let acceptedColor = north.color * north.weight + south.color * south.weight
+    + west.color * west.weight + east.color * east.weight
+    + northwest.color * northwest.weight + southeast.color * southeast.weight
+    + northeast.color * northeast.weight + southwest.color * southwest.weight;
+  // Rejected taps become the center color, so silhouettes and roof lines
+  // cannot bleed and the exact center texel always retains a dominant weight.
+  let focused = (2.0 * base + acceptedColor + base * (8.0 - acceptedWeight)) / 10.0;
+  var color = mix(base, focused, 0.82 * blurAmount);
 
-  // A compact bright-pass bloom gives water, pale roofs, signs, and windows a
-  // soft high-resolution glow without softening dark outlines in the focus.
-  let bloom = (
-    highlight(loadScene(pixel - horizontal * 2, size))
-    + highlight(loadScene(pixel + horizontal * 2, size))
-    + highlight(loadScene(pixel - vertical * 2, size))
-    + highlight(loadScene(pixel + vertical * 2, size))
-    + highlight(loadScene(pixel - diagonal * 2, size))
-    + highlight(loadScene(pixel + diagonal * 2, size))
-    + highlight(loadScene(pixel + vec2i(radius * 2, -radius * 2), size))
-    + highlight(loadScene(pixel + vec2i(-radius * 2, radius * 2), size))
-  ) * 0.125;
+  // Blur and bloom reuse the same eight accepted ring taps: including the
+  // center, this post-process performs only nine scene-color loads.
+  let bloom = (north.bloom * north.weight + south.bloom * south.weight
+    + west.bloom * west.weight + east.bloom * east.weight
+    + northwest.bloom * northwest.weight + southeast.bloom * southeast.weight
+    + northeast.bloom * northeast.weight + southwest.bloom * southwest.weight) / 8.0;
+  let optical = color;
   color += bloom * 0.23;
 
   // Filmic contrast and split toning tie the originally independent terrain
@@ -118,7 +142,8 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   color += vec3f(1.0, 0.76, 0.48) * (0.045 * keyGlow);
   color += vec3f(screenHash(vec2f(pixel)) - 0.5) * 0.006;
 
-  return vec4f(mix(base, clamp(color, vec3f(0.0), vec3f(1.0)), camera.values.z), 1.0);
+  let lit = mix(optical, clamp(color, vec3f(0.0), vec3f(1.0)), camera.values.z);
+  return vec4f(clamp(lit, vec3f(0.0), vec3f(1.0)), 1.0);
 }
 `;
 
@@ -139,6 +164,7 @@ struct VertexOutput {
   @location(0) uv: vec2f,
   @location(1) shade: f32,
   @location(2) fog: f32,
+  @location(3) cameraDepth: f32,
 }
 @group(0) @binding(0) var worldTexture: texture_2d<f32>;
 @group(0) @binding(1) var pixelSampler: sampler;
@@ -173,6 +199,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
   output.uv = input.uv;
   output.shade = input.shade;
   output.fog = clamp((depth - cameraHeight + 100.0) / 260.0, 0.0, 1.0);
+  output.cameraDepth = depth;
   return output;
 }
 
@@ -205,8 +232,13 @@ fn loadWorld(pixel: vec2i, size: vec2i) -> vec3f {
   return textureLoad(worldTexture, clamp(pixel, vec2i(0), size - 1), 0).rgb;
 }
 
+struct FragmentOutput {
+  @location(0) color: vec4f,
+  @location(1) focusDepth: f32,
+}
+
 @fragment
-fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   let size = vec2i(textureDimensions(worldTexture));
   let pixel = clamp(vec2i(input.uv * vec2f(size)), vec2i(0), size - 1);
   let world = camera.world.xy + vec2f(pixel) + vec2f(0.5);
@@ -248,7 +280,10 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let atmospheric = mix(graded, farHaze, input.fog * 0.055);
   let edge = smoothstep(0.58, 1.16, length(atlasPosition * vec2f(1.0, 0.82)));
   let finished = atmospheric * (1.0 - 0.048 * edge);
-  return vec4f(mix(base, finished, camera.values.z), 1.0);
+  var output: FragmentOutput;
+  output.color = vec4f(mix(base, finished, camera.values.z), 1.0);
+  output.focusDepth = input.cameraDepth;
+  return output;
 }
 `;
 
@@ -264,6 +299,7 @@ struct VertexInput {
   @location(7) matrix: vec4f,
   @location(8) screenOrigin: vec2f,
   @location(9) objectInfo: vec2f,
+  @location(10) cameraDepth: f32,
 }
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -275,6 +311,7 @@ struct VertexOutput {
   @location(5) @interpolate(flat) matrix: vec4i,
   @location(6) @interpolate(flat) screenOrigin: vec2i,
   @location(7) @interpolate(flat) objectInfo: vec2u,
+  @location(8) @interpolate(flat) cameraDepth: f32,
 }
 @group(0) @binding(0) var objectTexture: texture_2d_array<f32>;
 @group(0) @binding(1) var bgPriorityTexture: texture_2d<u32>;
@@ -291,12 +328,19 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
   output.matrix = vec4i(input.matrix);
   output.screenOrigin = vec2i(input.screenOrigin);
   output.objectInfo = vec2u(input.objectInfo);
+  output.cameraDepth = input.cameraDepth;
   return output;
 }
 
 struct FragmentOutput {
   @location(0) color: vec4f,
+  @location(1) focusDepth: f32,
   @builtin(frag_depth) depth: f32,
+}
+
+struct SilhouetteOutput {
+  @location(0) color: vec4f,
+  @location(1) focusDepth: f32,
 }
 
 fn objectColor(input: VertexOutput) -> vec4f {
@@ -338,15 +382,19 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   } else {
     output.color = color;
   }
+  output.focusDepth = input.cameraDepth;
   output.depth = input.position.z;
   return output;
 }
 
 @fragment
-fn fragmentSilhouette(input: VertexOutput) -> @location(0) vec4f {
+fn fragmentSilhouette(input: VertexOutput) -> SilhouetteOutput {
   let color = objectColor(input);
   if (color.a <= 0.0) { discard; }
-  return vec4f(mix(color.rgb, vec3f(0.72, 0.88, 0.92), 0.24), color.a * 0.62);
+  var output: SilhouetteOutput;
+  output.color = vec4f(mix(color.rgb, vec3f(0.72, 0.88, 0.92), 0.24), color.a * 0.62);
+  output.focusDepth = input.cameraDepth;
+  return output;
 }
 `;
 const CAST_SHADOW_SHADER = /* wgsl */ `
@@ -501,7 +549,7 @@ const CAMERA_TILT_DEGREES = 45.384615;
 const CAMERA_NEAR = 32;
 const CAMERA_FAR = 1024;
 const VERTEX_FLOATS = 8;
-const BILLBOARD_VERTEX_FLOATS = 19;
+const BILLBOARD_VERTEX_FLOATS = 20;
 const CAST_SHADOW_VERTEX_FLOATS = 16;
 
 function webGpuUnavailableError() {
@@ -557,6 +605,7 @@ class WebGpuPresenter {
     this.castShadowTexture = this.createTexture('unified projected shadow mask', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT, this.sceneWidth, this.sceneHeight);
     this.gradedTexture = this.createTexture('cinematic graded scene', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, this.sceneWidth, this.sceneHeight);
     this.depthTexture = this.createTexture('high-resolution 3D depth', 'depth24plus', GPUTextureUsage.RENDER_ATTACHMENT, this.sceneWidth, this.sceneHeight);
+    this.focusDepthTexture = this.createTexture('physical camera focus depth', 'r32float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT, this.sceneWidth, this.sceneHeight);
     this.cameraBuffer = device.createBuffer({ label: '3D camera and lighting', size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.vertexCapacity = 1024 * 1024;
     this.vertexBuffer = device.createBuffer({ label: 'projected terrain mesh', size: this.vertexCapacity, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
@@ -613,7 +662,9 @@ class WebGpuPresenter {
           { shaderLocation: 3, offset: 24, format: 'float32x2' },
         ] }],
       },
-      fragment: { module: terrainModule, entryPoint: 'fragmentMain', targets: [{ format: 'rgba8unorm' }] },
+      fragment: { module: terrainModule, entryPoint: 'fragmentMain', targets: [
+        { format: 'rgba8unorm' }, { format: 'r32float' },
+      ] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     });
@@ -686,6 +737,7 @@ class WebGpuPresenter {
         { shaderLocation: 7, offset: 44, format: 'float32x4' },
         { shaderLocation: 8, offset: 60, format: 'float32x2' },
         { shaderLocation: 9, offset: 68, format: 'float32x2' },
+        { shaderLocation: 10, offset: 76, format: 'float32' },
       ] }],
     };
     const billboardBlend = {
@@ -697,7 +749,7 @@ class WebGpuPresenter {
       vertex: billboardVertex,
       fragment: { module: billboardModule, entryPoint: 'fragmentMain', targets: [{
         format: 'rgba8unorm', blend: billboardBlend,
-      }] },
+      }, { format: 'r32float' }] },
       primitive: { topology: 'triangle-list' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less-equal' },
     });
@@ -712,7 +764,7 @@ class WebGpuPresenter {
       vertex: billboardVertex,
       fragment: { module: billboardModule, entryPoint: 'fragmentSilhouette', targets: [{
         format: 'rgba8unorm', blend: billboardBlend,
-      }] },
+      }, { format: 'r32float' }] },
       primitive: { topology: 'triangle-list' },
     });
     this.actorSilhouetteBindGroup = device.createBindGroup({
@@ -762,6 +814,7 @@ class WebGpuPresenter {
       layout: this.cinematicPipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: this.sceneTexture.createView() },
         { binding: 1, resource: { buffer: this.cameraBuffer } },
+        { binding: 2, resource: this.focusDepthTexture.createView() },
       ],
     });
     this.scenePresentBindGroup = this.device.createBindGroup({
@@ -783,12 +836,14 @@ class WebGpuPresenter {
       this.castShadowTexture.destroy();
       this.gradedTexture.destroy();
       this.depthTexture.destroy();
+      this.focusDepthTexture.destroy();
       this.sceneWidth = width;
       this.sceneHeight = height;
       this.sceneTexture = this.createTexture('high-resolution 3D scene', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, width, height);
       this.castShadowTexture = this.createTexture('unified projected shadow mask', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT, width, height);
       this.gradedTexture = this.createTexture('cinematic graded scene', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, width, height);
       this.depthTexture = this.createTexture('high-resolution 3D depth', 'depth24plus', GPUTextureUsage.RENDER_ATTACHMENT, width, height);
+      this.focusDepthTexture = this.createTexture('physical camera focus depth', 'r32float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT, width, height);
       this.rebuildSceneBindGroups();
     }
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
@@ -1146,6 +1201,7 @@ class WebGpuPresenter {
       y: this.height / 2 - viewY * focal / depth,
       scale: focal / depth,
       depth: (depth - CAMERA_NEAR) / (CAMERA_FAR - CAMERA_NEAR),
+      cameraDepth: depth,
     };
   }
 
@@ -1346,9 +1402,9 @@ class WebGpuPresenter {
     const normalVertices = [];
     const silhouetteVertices = [];
     const vertex = (vertices, x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
-                    affine, pa, pb, pc, pd, screenX, screenY, oamId, priority) =>
+                    affine, pa, pb, pc, pd, screenX, screenY, oamId, priority, cameraDepth) =>
       vertices.push(x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
-                    affine, pa, pb, pc, pd, screenX, screenY, oamId, priority);
+                    affine, pa, pb, pc, pd, screenX, screenY, oamId, priority, cameraDepth);
     for (const layer of order) {
       const o = layer * 16;
       const oamId = objectDescriptors[o];
@@ -1383,7 +1439,7 @@ class WebGpuPresenter {
       const vertices = isActor && shellOccludedGroups[spriteId]
         ? silhouetteVertices : normalVertices;
       const extra = [0, layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd,
-                     screenX, screenY, oamId, priority];
+                     screenX, screenY, oamId, priority, projected.cameraDepth];
       for (const point of [
         [x0,y0,0,0], [x1,y0,drawW,0], [x1,y1,drawW,drawH],
         [x0,y0,0,0], [x1,y1,drawW,drawH], [x0,y1,0,drawH],
@@ -1417,7 +1473,7 @@ class WebGpuPresenter {
     );
   }
 
-  present({ finalPixels, worldPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom }) {
+  present({ finalPixels, worldPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom, optics }) {
     const encoder = this.device.createCommandEncoder({ label: 'pokeemerald frame encoder' });
     let presentBindGroup = this.finalBindGroup;
     if (enhanced) {
@@ -1435,11 +1491,14 @@ class WebGpuPresenter {
       this.writeObjectSources(objectSourcePixels, objectSourceCount);
       this.writeTexture(this.bgPriorityTexture, bgPriorities, this.worldWidth, this.worldHeight, 1);
       this.writeTexture(this.uiTexture, this.uiPixels);
-      this.device.queue.writeBuffer(this.cameraBuffer, 0, new Float32Array([perspective, zoom, shading, CAMERA_HEIGHT, this.width, this.height, CAMERA_NEAR, CAMERA_FAR, worldPixelOriginX, worldPixelOriginY, 0, 0]));
+      this.device.queue.writeBuffer(this.cameraBuffer, 0, new Float32Array([perspective, zoom, shading, CAMERA_HEIGHT, this.width, this.height, CAMERA_NEAR, CAMERA_FAR, worldPixelOriginX, worldPixelOriginY, optics, 0]));
 
       const terrainPass = encoder.beginRenderPass({
         label: 'depth-tested projected terrain pass',
-        colorAttachments: [{ view: this.sceneTexture.createView(), clearValue: { r: 0.08, g: 0.15, b: 0.18, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+        colorAttachments: [
+          { view: this.sceneTexture.createView(), clearValue: { r: 0.08, g: 0.15, b: 0.18, a: 1 }, loadOp: 'clear', storeOp: 'store' },
+          { view: this.focusDepthTexture.createView(), clearValue: { r: CAMERA_FAR, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' },
+        ],
         depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
       terrainPass.setPipeline(this.terrainPipeline); terrainPass.setBindGroup(0, this.terrainBindGroup); terrainPass.setVertexBuffer(0, this.vertexBuffer); terrainPass.draw(vertexCount); terrainPass.end();
@@ -1459,14 +1518,20 @@ class WebGpuPresenter {
       if (billboardVertexCounts.silhouette) {
         const actorSilhouettePass = encoder.beginRenderPass({
           label: 'whole-actor building occlusion silhouette pass',
-          colorAttachments: [{ view: this.sceneTexture.createView(), loadOp: 'load', storeOp: 'store' }],
+          colorAttachments: [
+            { view: this.sceneTexture.createView(), loadOp: 'load', storeOp: 'store' },
+            { view: this.focusDepthTexture.createView(), loadOp: 'load', storeOp: 'store' },
+          ],
         });
         actorSilhouettePass.setPipeline(this.actorSilhouettePipeline); actorSilhouettePass.setBindGroup(0, this.actorSilhouetteBindGroup); actorSilhouettePass.setVertexBuffer(0, this.billboardVertexBuffer); actorSilhouettePass.draw(billboardVertexCounts.silhouette, 1, billboardVertexCounts.normal); actorSilhouettePass.end();
       }
 
       const billboardPass = encoder.beginRenderPass({
         label: 'upright billboard pass',
-        colorAttachments: [{ view: this.sceneTexture.createView(), loadOp: 'load', storeOp: 'store' }],
+        colorAttachments: [
+          { view: this.sceneTexture.createView(), loadOp: 'load', storeOp: 'store' },
+          { view: this.focusDepthTexture.createView(), loadOp: 'load', storeOp: 'store' },
+        ],
         depthStencilAttachment: { view: this.depthTexture.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
       });
       billboardPass.setPipeline(this.billboardPipeline); billboardPass.setBindGroup(0, this.billboardBindGroup); billboardPass.setVertexBuffer(0, this.billboardVertexBuffer); billboardPass.draw(billboardVertexCounts.normal); billboardPass.end();
@@ -1496,7 +1561,7 @@ class WebGpuPresenter {
     this.disposed = true;
     this.device.removeEventListener('uncapturederror', this.uncapturedErrorHandler);
     this.context.unconfigure();
-    for (const resource of [this.finalTexture,this.worldTexture,this.objectTexture,this.bgPriorityTexture,this.uiTexture,this.sceneTexture,this.castShadowTexture,this.gradedTexture,this.depthTexture,this.vertexBuffer,this.billboardVertexBuffer,this.castShadowVertexBuffer,this.cameraBuffer]) resource.destroy();
+    for (const resource of [this.finalTexture,this.worldTexture,this.objectTexture,this.bgPriorityTexture,this.uiTexture,this.sceneTexture,this.castShadowTexture,this.gradedTexture,this.depthTexture,this.focusDepthTexture,this.vertexBuffer,this.billboardVertexBuffer,this.castShadowVertexBuffer,this.cameraBuffer]) resource.destroy();
     this.device.destroy();
   }
 

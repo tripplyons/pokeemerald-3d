@@ -64,6 +64,7 @@ const visualModeParam = searchParams.get('view');
 const shadingParam = searchParams.get('shading');
 const perspectiveParam = searchParams.get('perspective');
 const zoomParam = searchParams.get('zoom');
+const opticsParam = searchParams.get('optics');
 const automate = searchParams.get('automate') === '1';
 const RENDER_SCALE_STORAGE_KEY = 'pokeemerald.wasm.renderScale.v1';
 const VISUAL_SETTINGS_STORAGE_KEY = 'pokeemerald.wasm.visualSettings.v1';
@@ -71,6 +72,7 @@ const DEFAULT_RENDER_SCALE = 4;
 const DEFAULT_SHADING_STRENGTH = 0.50;
 const DEFAULT_PERSPECTIVE_STRENGTH = 0.50;
 const DEFAULT_ZOOM_STRENGTH = 1.00;
+const DEFAULT_OPTICS_STRENGTH = 0.50;
 const RENDER_SCALES = [1, 2, 3, 4, 6, 8];
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 1000;
@@ -107,6 +109,8 @@ const depthInput = document.querySelector('#depth-strength');
 const depthValue = document.querySelector('#depth-value');
 const zoomInput = document.querySelector('#zoom-out');
 const zoomValue = document.querySelector('#zoom-value');
+const opticsInput = document.querySelector('#optics-strength');
+const opticsValue = document.querySelector('#optics-value');
 const fullscreenButton = document.querySelector('#fullscreen');
 const shell = document.querySelector('.shell');
 const downloadSaveButton = document.querySelector('#download-save');
@@ -117,14 +121,17 @@ let presenterRecreationCount = 0;
 let runtimeStopped = false;
 let renderScale = DEFAULT_RENDER_SCALE;
 const VISUAL_MODE_TRANSITION_MS = 4000;
+const reducedMotionQuery = matchMedia('(prefers-reduced-motion: reduce)');
 let visualMode = 'hd2d';
 let activeVisualMode = 'hd2d';
 let shadingStrength = DEFAULT_SHADING_STRENGTH;
 let perspectiveStrength = DEFAULT_PERSPECTIVE_STRENGTH;
 let zoomStrength = DEFAULT_ZOOM_STRENGTH;
+let opticsStrength = DEFAULT_OPTICS_STRENGTH;
 let renderedShadingStrength = shadingStrength;
 let renderedPerspectiveStrength = perspectiveStrength;
 let renderedZoomStrength = zoomStrength;
+let renderedOpticsStrength = opticsStrength;
 let visualModeTransition = null;
 let image;
 let worldPixels;
@@ -240,6 +247,7 @@ function storedVisualSettings() {
     shading: clampSetting(shadingParam ?? stored.shading, DEFAULT_SHADING_STRENGTH),
     perspective: clampSetting(perspectiveParam ?? stored.perspective, DEFAULT_PERSPECTIVE_STRENGTH),
     zoom: clampZoom(zoomParam ?? stored.zoom, DEFAULT_ZOOM_STRENGTH),
+    optics: clampSetting(opticsParam ?? stored.optics, DEFAULT_OPTICS_STRENGTH),
   };
 }
 
@@ -271,12 +279,15 @@ function updateVisualModeTransition(now = visualModeTransitionNow()) {
     + (visualModeTransition.toPerspective - visualModeTransition.fromPerspective) * blend;
   renderedZoomStrength = visualModeTransition.fromZoom
     + (visualModeTransition.toZoom - visualModeTransition.fromZoom) * blend;
+  renderedOpticsStrength = visualModeTransition.fromOptics
+    + (visualModeTransition.toOptics - visualModeTransition.fromOptics) * blend;
   if (progress < 1) return;
 
   const completedMode = visualModeTransition.mode;
   renderedShadingStrength = visualModeTransition.toShading;
   renderedPerspectiveStrength = visualModeTransition.toPerspective;
   renderedZoomStrength = visualModeTransition.toZoom;
+  renderedOpticsStrength = visualModeTransition.toOptics;
   visualModeTransition = null;
   if (completedMode === 'classic') setActiveVisualMode('classic');
 }
@@ -287,18 +298,21 @@ function beginVisualModeTransition(mode, now = visualModeTransitionNow()) {
     renderedShadingStrength = 0;
     renderedPerspectiveStrength = 0;
     renderedZoomStrength = 0;
+    renderedOpticsStrength = 0;
     setActiveVisualMode('hd2d');
   }
   visualModeTransition = {
     mode,
     startedAt: null,
-    durationMs: VISUAL_MODE_TRANSITION_MS,
+    durationMs: reducedMotionQuery.matches ? 0 : VISUAL_MODE_TRANSITION_MS,
     fromShading: renderedShadingStrength,
     fromPerspective: renderedPerspectiveStrength,
     fromZoom: renderedZoomStrength,
+    fromOptics: renderedOpticsStrength,
     toShading: mode === 'hd2d' ? shadingStrength : 0,
     toPerspective: mode === 'hd2d' ? perspectiveStrength : 0,
     toZoom: mode === 'hd2d' ? zoomStrength : 0,
+    toOptics: mode === 'hd2d' ? opticsStrength : 0,
   };
 }
 
@@ -311,6 +325,7 @@ function setVisualSettings(settings, persist = true, animate = true) {
   shadingStrength = clampSetting(settings.shading, shadingStrength);
   perspectiveStrength = clampSetting(settings.perspective, perspectiveStrength);
   zoomStrength = clampZoom(settings.zoom, zoomStrength);
+  opticsStrength = clampSetting(settings.optics, opticsStrength);
 
   if (!instance) {
     activeVisualMode = visualMode;
@@ -318,6 +333,7 @@ function setVisualSettings(settings, persist = true, animate = true) {
     renderedShadingStrength = visualMode === 'hd2d' ? shadingStrength : 0;
     renderedPerspectiveStrength = visualMode === 'hd2d' ? perspectiveStrength : 0;
     renderedZoomStrength = visualMode === 'hd2d' ? zoomStrength : 0;
+    renderedOpticsStrength = visualMode === 'hd2d' ? opticsStrength : 0;
   } else if (modeChanged && animate) {
     beginVisualModeTransition(visualMode, now);
   } else if (modeChanged) {
@@ -326,16 +342,19 @@ function setVisualSettings(settings, persist = true, animate = true) {
       renderedShadingStrength = 0;
       renderedPerspectiveStrength = 0;
       renderedZoomStrength = 0;
+      renderedOpticsStrength = 0;
       setActiveVisualMode('hd2d');
     }
     renderedShadingStrength = visualMode === 'hd2d' ? shadingStrength : 0;
     renderedPerspectiveStrength = visualMode === 'hd2d' ? perspectiveStrength : 0;
     renderedZoomStrength = visualMode === 'hd2d' ? zoomStrength : 0;
+    renderedOpticsStrength = visualMode === 'hd2d' ? opticsStrength : 0;
     setActiveVisualMode(visualMode);
   } else if (!visualModeTransition && activeVisualMode === 'hd2d') {
     renderedShadingStrength = shadingStrength;
     renderedPerspectiveStrength = perspectiveStrength;
     renderedZoomStrength = zoomStrength;
+    renderedOpticsStrength = opticsStrength;
   } else if (visualModeTransition?.mode === 'hd2d') {
     const previousTransition = visualModeTransition;
     const endsAt = previousTransition.startedAt === null
@@ -348,9 +367,11 @@ function setVisualSettings(settings, persist = true, animate = true) {
       fromShading: renderedShadingStrength,
       fromPerspective: renderedPerspectiveStrength,
       fromZoom: renderedZoomStrength,
+      fromOptics: renderedOpticsStrength,
       toShading: shadingStrength,
       toPerspective: perspectiveStrength,
       toZoom: zoomStrength,
+      toOptics: opticsStrength,
     };
   }
 
@@ -358,9 +379,11 @@ function setVisualSettings(settings, persist = true, animate = true) {
   shadingInput.value = String(Math.round(shadingStrength * 100));
   depthInput.value = String(Math.round(perspectiveStrength * 100));
   zoomInput.value = String(Math.round(zoomStrength * 100));
+  opticsInput.value = String(Math.round(opticsStrength * 100));
   shadingValue.textContent = `${Math.round(shadingStrength * 100)}%`;
   depthValue.textContent = `${Math.round(perspectiveStrength * 100)}%`;
   zoomValue.textContent = `${Math.round(zoomStrength * 100)}%`;
+  opticsValue.textContent = `${Math.round(opticsStrength * 100)}%`;
   if (persist) {
     try {
       localStorage.setItem(VISUAL_SETTINGS_STORAGE_KEY, JSON.stringify({
@@ -368,6 +391,7 @@ function setVisualSettings(settings, persist = true, animate = true) {
         shading: shadingStrength,
         perspective: perspectiveStrength,
         zoom: zoomStrength,
+        optics: opticsStrength,
       }));
     } catch {
       // Keep settings for this session when storage is unavailable.
@@ -965,6 +989,7 @@ function render() {
     shading: renderedShadingStrength,
     perspective: renderedPerspectiveStrength,
     zoom: renderedZoomStrength,
+    optics: renderedOpticsStrength,
   });
 }
 
@@ -1197,24 +1222,35 @@ visualModeSelect.addEventListener('change', () => setVisualSettings({
   shading: shadingStrength,
   perspective: perspectiveStrength,
   zoom: zoomStrength,
+  optics: opticsStrength,
 }));
 shadingInput.addEventListener('input', () => setVisualSettings({
   mode: visualMode,
   shading: Number(shadingInput.value) / 100,
   perspective: perspectiveStrength,
   zoom: zoomStrength,
+  optics: opticsStrength,
 }));
 depthInput.addEventListener('input', () => setVisualSettings({
   mode: visualMode,
   shading: shadingStrength,
   perspective: Number(depthInput.value) / 100,
   zoom: zoomStrength,
+  optics: opticsStrength,
 }));
 zoomInput.addEventListener('input', () => setVisualSettings({
   mode: visualMode,
   shading: shadingStrength,
   perspective: perspectiveStrength,
   zoom: Number(zoomInput.value) / 100,
+  optics: opticsStrength,
+}));
+opticsInput.addEventListener('input', () => setVisualSettings({
+  mode: visualMode,
+  shading: shadingStrength,
+  perspective: perspectiveStrength,
+  zoom: zoomStrength,
+  optics: Number(opticsInput.value) / 100,
 }));
 
 fullscreenButton.addEventListener('click', async () => {
@@ -1496,9 +1532,11 @@ function automationState() {
     shadingStrength,
     perspectiveStrength,
     zoomStrength,
+    opticsStrength,
     renderedShadingStrength,
     renderedPerspectiveStrength,
     renderedZoomStrength,
+    renderedOpticsStrength,
     visualModeTransition: visualModeTransition?.mode ?? null,
     sceneKind: lastSceneKind,
     blendControl: u16[(REG + 0x50) >> 1],
@@ -1665,6 +1703,7 @@ function automationApi() {
       shading: shadingStrength,
       perspective: perspectiveStrength,
       zoom: zoomStrength,
+      optics: opticsStrength,
     }, false, animate),
     warp: automationWarp,
     runToFrame,

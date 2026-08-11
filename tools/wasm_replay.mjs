@@ -10,14 +10,14 @@ const buttons = new Set(['a', 'b', 'select', 'start', 'right', 'left', 'up', 'do
 const defaultOutputDir = 'wasm-replay-output';
 
 function usage() {
-  console.error('usage: node tools/wasm_replay.mjs <events.txt> [output-dir] [--no-build] [--keep-browser] [--view=classic|hd2d] [--shading=0..1] [--zoom=0..1] [--perspective=0..1] [--render-scale=1|2|3|4|6|8] [--save=path/to/game.sav]');
+  console.error('usage: node tools/wasm_replay.mjs <events.txt> [output-dir] [--no-build] [--keep-browser] [--view=classic|hd2d] [--shading=0..1] [--zoom=0..1] [--perspective=0..1] [--optics=0..1] [--render-scale=1|2|3|4|6|8] [--save=path/to/game.sav]');
   console.error('event frame numbers are emulated game frames, not display frames');
   console.error('events: screenshot [name], button <name> <on|off>, warp <group> <map> <x> <y>, avatar <mode>, running-shoes <on|off>, weather <0..15>, view <classic|hd2d>, gpu-loss, probe <name>');
   process.exit(2);
 }
 
 function parseArgs(argv) {
-  const options = { build: true, keepBrowser: false, view: 'hd2d', shading: 0.50, zoom: 1.00, perspective: 0.50, renderScale: 4, savePath: null };
+  const options = { build: true, keepBrowser: false, view: 'hd2d', shading: 0.50, zoom: 1.00, perspective: 0.50, optics: 0.50, renderScale: 4, savePath: null };
   const paths = [];
   for (const arg of argv) {
     if (arg === '--no-build') options.build = false;
@@ -34,6 +34,9 @@ function parseArgs(argv) {
     } else if (arg.startsWith('--perspective=')) {
       options.perspective = Number(arg.slice('--perspective='.length));
       if (!Number.isFinite(options.perspective) || options.perspective < 0 || options.perspective > 1) usage();
+    } else if (arg.startsWith('--optics=')) {
+      options.optics = Number(arg.slice('--optics='.length));
+      if (!Number.isFinite(options.optics) || options.optics < 0 || options.optics > 1) usage();
     } else if (arg.startsWith('--render-scale=')) {
       options.renderScale = Number(arg.slice('--render-scale='.length));
       if (![1, 2, 3, 4, 6, 8].includes(options.renderScale)) usage();
@@ -354,7 +357,7 @@ async function main() {
     await cdp.send('Runtime.enable');
     await cdp.send('Log.enable');
     await cdp.send('Page.enable');
-    await cdp.send('Page.navigate', { url: `${server.url}/?automate=1&view=${options.view}&shading=${options.shading}&zoom=${options.zoom}&perspective=${options.perspective}&renderScale=${options.renderScale}` });
+    await cdp.send('Page.navigate', { url: `${server.url}/?automate=1&view=${options.view}&shading=${options.shading}&zoom=${options.zoom}&perspective=${options.perspective}&optics=${options.optics}&renderScale=${options.renderScale}` });
     await evaluate(cdp, `new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timed out waiting for wasm automation')), 30000);
       const check = () => {
@@ -401,7 +404,7 @@ async function main() {
         probes.push(await runProbe(cdp, event));
       }
     }
-    await writeFile(resolve(outputDir, 'summary.json'), JSON.stringify({ input: basename(inputPath), frameUnit: 'emulated_game_frame', view: options.view, shading: options.shading, zoom: options.zoom, perspective: options.perspective, renderScale: options.renderScale, screenshots, probes, errors }, null, 2));
+    await writeFile(resolve(outputDir, 'summary.json'), JSON.stringify({ input: basename(inputPath), frameUnit: 'emulated_game_frame', view: options.view, shading: options.shading, zoom: options.zoom, perspective: options.perspective, optics: options.optics, renderScale: options.renderScale, screenshots, probes, errors }, null, 2));
   } catch (error) {
     errors.push(error.stack || String(error));
     process.exitCode = 1;
