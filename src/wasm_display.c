@@ -1449,12 +1449,13 @@ static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
         return HD_SURFACE_WATER;
     if (HdMapSampleIsTerrainCourse(index, sampleX, sampleY, sampleCols))
         return HD_SURFACE_TERRAIN;
-    // Only cells with top-plane art obstruct. Bottom-plane-only collision
-    // tiles (border hedges, fences) render flat in the classic view, so
-    // extruding them as obstacles produces spurious side faces that sample
-    // adjacent pavement instead of their own art.
+    // A generic obstacle needs a complete authored top plane. Partially
+    // transparent art has no independent alpha mask in the terrain texture;
+    // raising either the whole metatile or only its occupied quadrants lifts
+    // visible pavement and water or fragments one object into separate slabs.
     if (sample->collision
-     && HdMetatileCoverage(sample, 1) != 0)
+     && HdMetatileCoverage(sample, 1)
+        == 4 * HD2D_TILE_WIDTH * HD2D_TILE_WIDTH)
         return HD_SURFACE_OBSTACLE;
     return HD_SURFACE_GROUND;
 }
@@ -1876,7 +1877,8 @@ static void RenderHd2dWorld(u16 dispcnt)
                 const u32 sampleX = courseX / 2;
                 const u32 sampleY = courseY / 2;
                 const u32 sample = sampleY * sampleCols + sampleX;
-                const u8 surface = HdMapSampleBaseSurface(sample, sampleX, sampleY, sampleCols);
+                const u8 surface = HdMapSampleBaseSurface(sample, sampleX, sampleY,
+                                                          sampleCols);
                 const s8 height = HdSurfaceBaseHeight(surface);
 
                 sHdCourseGeometry[course] = surface;

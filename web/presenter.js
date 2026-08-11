@@ -1106,6 +1106,8 @@ class WebGpuPresenter {
       }
     }
 
+    const sameRoof = (x, y, id) => inGrid(x, y)
+      && surfaceAt(x, y) === SURFACE_ROOF && componentAt(x, y) === id;
     const facadeVisited = new Uint8Array(cols * rows);
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
@@ -1134,19 +1136,25 @@ class WebGpuPresenter {
         }
 
         const component = components.get(id);
-        const sourceHeight = depth * TILE_SIZE;
-        const top = component.base + sourceHeight;
+        // Meet the facade at its authored roof plane. Deriving the top from
+        // each rectangle's source depth splits one connected building into
+        // different physical heights when its facade is stepped or clipped.
+        let top = component.roofHeight;
+        if (!Number.isFinite(top)) top = component.base + depth * TILE_SIZE;
         const x0 = worldX(tx);
         const x1 = worldX(tx + width);
         // The authored wall rectangle is vertical source art, so its physical
         // south/front edge is after all of its 8px courses rather than at the
         // rectangle's north edge.
         const z = worldZ(ty + depth);
+        const vTop = top - component.base >= depth * TILE_SIZE
+          ? textureV(ty)
+          : textureV(ty + depth - (top - component.base) / TILE_SIZE);
         quad(
           [x0, component.base, z, textureU(tx), textureV(ty + depth)],
           [x1, component.base, z, textureU(tx + width), textureV(ty + depth)],
-          [x1, top, z, textureU(tx + width), textureV(ty)],
-          [x0, top, z, textureU(tx), textureV(ty)],
+          [x1, top, z, textureU(tx + width), vTop],
+          [x0, top, z, textureU(tx), vTop],
           [0, 0, 1], SURFACE_WALL, 1, component.base,
         );
         component.x0 = Math.min(component.x0, x0);
@@ -1170,8 +1178,6 @@ class WebGpuPresenter {
     // Fill the footprint represented by vertical facade source courses with
     // the adjacent roof boundary course. This extends the authored top mass to
     // the relocated front without ever laying facade pixels horizontally.
-    const sameRoof = (x, y, id) => inGrid(x, y)
-      && surfaceAt(x, y) === SURFACE_ROOF && componentAt(x, y) === id;
     for (const component of components.values()) {
       const localRoofSource = (tx, ty) => {
         let sourceX = tx;
@@ -1192,10 +1198,24 @@ class WebGpuPresenter {
         return [sourceX, sourceY];
       };
       for (const [tx, ty, width, depth, top] of component.wallRects) {
-        // Stretch each adjacent boundary course once through the complete
-        // authored facade depth. Repeating it per wall course would invent
-        // roof bands, while sampling the wall rectangle would lay facade art
-        // horizontally.
+        if (!component.roofCells.length) continue;
+        let boundaryIsRoof = false;
+        for (let x = 0; x < width && !boundaryIsRoof; x++)
+          boundaryIsRoof = sameRoof(tx + x, ty - 1, component.id);
+        if (boundaryIsRoof) {
+          // Preserve a continuous authored roof span. Per-column nearest-roof
+          // snapping repeats source strips and opens seams whenever adjacent
+          // columns choose different boundary cells.
+          const sourceY = Math.max(0, ty - 1);
+          quad(
+            [worldX(tx),top,worldZ(ty),textureU(tx),textureV(sourceY)],
+            [worldX(tx + width),top,worldZ(ty),textureU(tx + width),textureV(sourceY)],
+            [worldX(tx + width),top,worldZ(ty + depth),textureU(tx + width),textureV(sourceY + 1)],
+            [worldX(tx),top,worldZ(ty + depth),textureU(tx),textureV(sourceY + 1)],
+            [0, 1, 0], SURFACE_ROOF, 1, component.base,
+          );
+          continue;
+        }
         for (let x = 0; x < width; x++) {
           const source = localRoofSource(tx + x, ty);
           if (!source) continue;

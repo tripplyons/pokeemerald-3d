@@ -1,0 +1,28 @@
+# Representative HD-2D building geometry coverage. Keep the first checkpoint
+# aligned with the supplied save's Battle Frontier Outside East coordinates.
+120 warp 26 14 39 40
+320 screenshot frontier-save-building
+320 probe state
+321 probe hd2d-courses
+322 probe world-atlas
+323 probe height-map
+
+# The southern plaza exposes long facade/roof spans and previously showed
+# pale horizontal slabs when facade courses were admitted as roof geometry.
+324 warp 26 14 30 48
+524 screenshot frontier-south-building
+524 probe state
+525 probe hd2d-courses
+526 probe world-atlas
+527 probe height-map
+
+# Exercise distinct authored building shapes and their perimeter closure.
+528 warp 26 14 16 17
+728 screenshot frontier-battle-tower
+728 probe hd2d-courses
+729 warp 26 14 3 54
+929 screenshot frontier-pokemon-center
+929 probe hd2d-courses
+930 warp 0 4 5 9
+1130 screenshot fortree-buildings
+1130 probe hd2d-courses
