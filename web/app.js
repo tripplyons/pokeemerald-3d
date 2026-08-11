@@ -112,6 +112,9 @@ const shell = document.querySelector('.shell');
 const downloadSaveButton = document.querySelector('#download-save');
 const uploadSaveInput = document.querySelector('#upload-save');
 let presenter;
+let presenterRecoveryPromise = null;
+let presenterRecreationCount = 0;
+let runtimeStopped = false;
 let renderScale = DEFAULT_RENDER_SCALE;
 const VISUAL_MODE_TRANSITION_MS = 4000;
 let visualMode = 'hd2d';
@@ -145,6 +148,16 @@ function showFatalError(error, prefix) {
   statusEl.textContent = `${prefix}: ${message}`;
   statusEl.classList.add('error');
   statusEl.setAttribute('role', 'alert');
+}
+
+function stopRuntime(error, prefix) {
+  if (runtimeStopped) return;
+  runtimeStopped = true;
+  bootId++;
+  saveFlashIfChanged(true);
+  presenter?.destroy();
+  presenter = undefined;
+  showFatalError(error, prefix);
 }
 
 let instance;
@@ -189,7 +202,7 @@ function setRenderScale(value, persist = true) {
   renderScale = RENDER_SCALES.includes(parsed) ? parsed : DEFAULT_RENDER_SCALE;
   canvas.width = WIDTH * renderScale;
   canvas.height = HEIGHT * renderScale;
-  presenter?.resize(renderScale);
+  if (!presenterRecoveryPromise) presenter?.resize(renderScale);
   renderScaleSelect.value = String(renderScale);
 
   if (persist) {
@@ -921,6 +934,7 @@ function refreshObjectEventSpriteFlags() {
 }
 
 function render() {
+  if (!presenter || presenterRecoveryPromise || runtimeStopped) return;
   updateVisualModeTransition();
   lastSceneKind = instance.exports.WasmDisplaySceneKind();
   const enhanced = activeVisualMode === 'hd2d' && lastSceneKind === 1;
@@ -1232,19 +1246,85 @@ function fpsStatus(displayFps, gameFps) {
   return `${statusText} — Display FPS: ${displayFps}, Game FPS: ${gameFps} (${(gameFps / 60).toFixed(1)}x)`;
 }
 
-async function boot(saveBytes) {
-  const thisBootId = ++bootId;
-  const { bytes, module } = await wasmModule();
-  instance = await WebAssembly.instantiate(module, importsFor(module));
-  memory = instance.exports.memory;
-  presenter ??= await createPresenter({
+function presenterOptions() {
+  return {
     canvas,
     width: WIDTH,
     height: HEIGHT,
     worldWidth: instance.exports.WasmWorldWidth(),
     worldHeight: instance.exports.WasmWorldHeight(),
     scale: renderScale,
+    onFailure: handlePresenterFailure,
+  };
+}
+
+async function recoverPresenter(failedPresenter, error, kind) {
+  const previousStatus = statusText;
+  statusText = `recovering WebGPU after ${kind}…`;
+  statusEl.textContent = statusText;
+  failedPresenter.destroy();
+
+  let replacement;
+  try {
+    replacement = await createPresenter(presenterOptions());
+    if (replacement.failure) throw replacement.failure.error;
+    if (runtimeStopped) {
+      replacement.destroy();
+      return;
+    }
+    presenter = replacement;
+    statusText = previousStatus;
+    statusEl.classList.remove('error');
+    statusEl.removeAttribute('role');
+    statusEl.textContent = `${statusText} — WebGPU recovered`;
+  } catch (replacementError) {
+    replacement?.destroy();
+    const detail = replacementError instanceof Error ? replacementError.message : String(replacementError);
+    stopRuntime(
+      new Error(`${error.message} Presenter recreation failed: ${detail}. Reload the page; if this repeats, update the browser or graphics driver.`),
+      'WebGPU recovery failed',
+    );
+  }
+}
+
+function handlePresenterFailure(failedPresenter, error, kind) {
+  if (failedPresenter !== presenter || runtimeStopped) return presenterRecoveryPromise;
+  console.error(error);
+  if (presenterRecoveryPromise) return presenterRecoveryPromise;
+  if (kind !== 'device lost') {
+    stopRuntime(
+      new Error(`${error.message} Reload the page; if this repeats, update the browser or graphics driver.`),
+      'WebGPU error',
+    );
+    return null;
+  }
+  if (presenterRecreationCount >= 1) {
+    stopRuntime(
+      new Error(`${error.message} The replacement presenter also failed. Reload the page; if this repeats, update the browser or graphics driver.`),
+      'WebGPU stopped',
+    );
+    return null;
+  }
+
+  presenterRecreationCount++;
+  const recovery = recoverPresenter(failedPresenter, error, kind);
+  presenterRecoveryPromise = recovery;
+  void recovery.finally(() => {
+    if (presenterRecoveryPromise === recovery) presenterRecoveryPromise = null;
   });
+  return recovery;
+}
+
+async function boot(saveBytes) {
+  const thisBootId = ++bootId;
+  const { bytes, module } = await wasmModule();
+  instance = await WebAssembly.instantiate(module, importsFor(module));
+  memory = instance.exports.memory;
+  if (!presenter) {
+    presenter = await createPresenter(presenterOptions());
+    if (presenter.failure) throw presenter.failure.error;
+  }
+  runtimeStopped = false;
   window.pokeemerald = { instance, memory, runFrames };
   instance.exports.WasmSetHd2dEnabled(activeVisualMode === 'hd2d' ? 1 : 0);
   if (automate) window.pokeemerald.automation = automationApi();
@@ -1407,7 +1487,10 @@ function automationState() {
   const objectEvent = instance.exports.gObjectEvents.value + objectEventId * 0x24;
   return {
     frame: currentFrame,
-    presenter: presenter.kind,
+    presenter: presenter?.kind ?? null,
+    presenterRecreations: presenterRecreationCount,
+    presenterRecovering: Boolean(presenterRecoveryPromise),
+    runtimeStopped,
     visualMode,
     activeVisualMode,
     shadingStrength,
@@ -1527,6 +1610,17 @@ async function automationLoadSave(encoded) {
   await restartWithSave(normalized);
 }
 
+async function automationSimulateDeviceLoss() {
+  if (!presenter || presenterRecoveryPromise) throw new Error('WebGPU presenter is not ready for a simulated loss');
+  const failedPresenter = presenter;
+  await failedPresenter.simulateDeviceLoss();
+  await Promise.resolve();
+  if (presenterRecoveryPromise) await presenterRecoveryPromise;
+  if (runtimeStopped) throw new Error(statusEl.textContent);
+  render();
+  return automationState();
+}
+
 function automationMapGrid(radius = 14) {
   if (!Number.isInteger(radius) || radius < 1 || radius > 32) throw new Error('invalid map-grid radius');
   const state = automationState();
@@ -1579,6 +1673,7 @@ function automationApi() {
     objectDescriptors: automationObjectDescriptors,
     objectEvents: automationObjectEvents,
     hblankDmaWin0HProbe,
+    simulateDeviceLoss: automationSimulateDeviceLoss,
     state: automationState,
     frame: () => currentFrame,
   };
@@ -1609,21 +1704,26 @@ function runFramesForTick(elapsedMs) {
 }
 
 function tick(thisBootId, now) {
-  if (thisBootId !== bootId) return;
+  if (thisBootId !== bootId || runtimeStopped) return;
   try {
+    if (presenterRecoveryPromise) {
+      lastTick = now;
+      requestAnimationFrame((nextNow) => tick(thisBootId, nextNow));
+      return;
+    }
     const elapsedMs = Math.min(now - lastTick, 100);
     lastTick = now;
     const frames = runFramesForTick(elapsedMs);
     render();
     updateFps(frames);
-    requestAnimationFrame((nextNow) => tick(thisBootId, nextNow));
+    if (!runtimeStopped) requestAnimationFrame((nextNow) => tick(thisBootId, nextNow));
   } catch (error) {
     console.error(error);
-    showFatalError(error, 'The game stopped');
+    stopRuntime(error, 'The game stopped');
   }
 }
 
 boot().catch((error) => {
   console.error(error);
-  showFatalError(error, 'Unable to start');
+  stopRuntime(error, 'Unable to start');
 });

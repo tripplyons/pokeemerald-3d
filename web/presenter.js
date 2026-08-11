@@ -516,16 +516,30 @@ function webGpuUnavailableError() {
 }
 
 class WebGpuPresenter {
-  static async create(canvas, width, height, worldWidth, worldHeight, scale) {
+  static async create(canvas, width, height, worldWidth, worldHeight, scale, onFailure) {
     if (!navigator.gpu) throw webGpuUnavailableError();
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error('WebGPU is available, but no compatible graphics adapter was found.');
     const device = await adapter.requestDevice();
-    return new WebGpuPresenter(canvas, width, height, worldWidth, worldHeight, scale, adapter, device);
+    try {
+      return new WebGpuPresenter(canvas, width, height, worldWidth, worldHeight, scale, adapter, device, onFailure);
+    } catch (error) {
+      device.destroy();
+      throw error;
+    }
   }
 
-  constructor(canvas, width, height, worldWidth, worldHeight, scale, adapter, device) {
+  constructor(canvas, width, height, worldWidth, worldHeight, scale, adapter, device, onFailure) {
     Object.assign(this, { canvas, width, height, worldWidth, worldHeight, adapter, device });
+    this.disposed = false;
+    this.failure = null;
+    this.onFailure = onFailure;
+    this.uncapturedErrorHandler = (event) => {
+      if (this.disposed) return;
+      event.preventDefault();
+      const detail = event.error?.message || String(event.error || 'unknown WebGPU error');
+      this.reportFailure('uncaptured error', new Error(`WebGPU reported an uncaptured error: ${detail}`));
+    };
     this.context = canvas.getContext('webgpu');
     if (!this.context) throw new Error('WebGPU canvas context is unavailable');
     this.format = navigator.gpu.getPreferredCanvasFormat();
@@ -564,6 +578,19 @@ class WebGpuPresenter {
     this.sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest', mipmapFilter: 'nearest' });
     this.createPipelines();
     this.resize(scale);
+    device.addEventListener('uncapturederror', this.uncapturedErrorHandler);
+    device.lost.then((info) => {
+      if (this.disposed) return;
+      const reason = info.reason && info.reason !== 'unknown' ? ` (${info.reason})` : '';
+      const detail = info.message ? `: ${info.message}` : '';
+      this.reportFailure('device lost', new Error(`WebGPU device was lost${reason}${detail}`));
+    });
+  }
+
+  reportFailure(kind, error) {
+    if (this.failure || this.disposed) return;
+    this.failure = { kind, error };
+    this.onFailure?.(this, error, kind);
   }
 
   createTexture(label, format, usage, width = this.width, height = this.height) {
@@ -743,6 +770,7 @@ class WebGpuPresenter {
   get kind() { return 'webgpu-3d'; }
 
   resize(scale) {
+    if (this.disposed) return;
     this.scale = scale;
     const width = this.width * scale;
     const height = this.height * scale;
@@ -1443,11 +1471,21 @@ class WebGpuPresenter {
   async ready() { await this.device.queue.onSubmittedWorkDone(); }
 
   destroy() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.device.removeEventListener('uncapturederror', this.uncapturedErrorHandler);
+    this.context.unconfigure();
     for (const resource of [this.finalTexture,this.worldTexture,this.objectTexture,this.bgPriorityTexture,this.uiTexture,this.sceneTexture,this.castShadowTexture,this.gradedTexture,this.depthTexture,this.vertexBuffer,this.billboardVertexBuffer,this.castShadowVertexBuffer,this.cameraBuffer]) resource.destroy();
     this.device.destroy();
   }
+
+  simulateDeviceLoss() {
+    if (this.disposed) throw new Error('cannot lose a disposed WebGPU presenter');
+    this.device.destroy();
+    return this.device.lost;
+  }
 }
 
-export async function createPresenter({ canvas, width, height, worldWidth, worldHeight, scale }) {
-  return WebGpuPresenter.create(canvas, width, height, worldWidth, worldHeight, scale);
+export async function createPresenter({ canvas, width, height, worldWidth, worldHeight, scale, onFailure }) {
+  return WebGpuPresenter.create(canvas, width, height, worldWidth, worldHeight, scale, onFailure);
 }

@@ -12,7 +12,7 @@ const defaultOutputDir = 'wasm-replay-output';
 function usage() {
   console.error('usage: node tools/wasm_replay.mjs <events.txt> [output-dir] [--no-build] [--keep-browser] [--view=classic|hd2d] [--shading=0..1] [--zoom=0..1] [--perspective=0..1] [--render-scale=1|2|3|4|6|8] [--save=path/to/game.sav]');
   console.error('event frame numbers are emulated game frames, not display frames');
-  console.error('events: screenshot [name], button <name> <on|off>, warp <group> <map> <x> <y>, avatar <mode>, running-shoes <on|off>, weather <0..15>, view <classic|hd2d>, probe <name>');
+  console.error('events: screenshot [name], button <name> <on|off>, warp <group> <map> <x> <y>, avatar <mode>, running-shoes <on|off>, weather <0..15>, view <classic|hd2d>, gpu-loss, probe <name>');
   process.exit(2);
 }
 
@@ -113,6 +113,12 @@ function parseEvents(text) {
         throw new Error(`${index + 1}: expected "<frame> probe <hblank-dma-win0h|trainer-id-nonzero|renderer-fps|object-descriptors|object-events|state|map-grid>"`);
       }
       events.push({ frame, type: 'probe', name: fields[2] });
+      continue;
+    }
+
+    if (fields[1] === 'gpu-loss') {
+      if (fields.length !== 2) throw new Error(`${index + 1}: expected "<frame> gpu-loss"`);
+      events.push({ frame, type: 'gpu-loss' });
       continue;
     }
 
@@ -387,6 +393,8 @@ async function main() {
         await evaluate(cdp, `window.pokeemerald.automation.setRunningShoes(${event.enabled})`);
       } else if (event.type === 'view') {
         await evaluate(cdp, `window.pokeemerald.automation.setVisualMode(${JSON.stringify(event.mode)}, ${event.animate})`);
+      } else if (event.type === 'gpu-loss') {
+        probes.push({ frame: event.frame, name: 'gpu-loss', result: await evaluate(cdp, `window.pokeemerald.automation.simulateDeviceLoss()`) });
       } else if (event.type === 'screenshot') {
         screenshots.push(await saveScreenshot(cdp, outputDir, event));
       } else if (event.type === 'probe') {

@@ -1,0 +1,8 @@
+# Exercise the one bounded WebGPU presenter recreation without restarting WASM.
+0 screenshot before-device-loss
+1 view classic
+1 gpu-loss
+1 probe state
+2 view hd2d
+2 probe state
+2 screenshot after-device-loss
