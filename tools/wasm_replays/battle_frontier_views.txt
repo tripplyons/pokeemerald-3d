@@ -775,3 +775,72 @@
 25225 button down off
 25226 screenshot frontier-gate-after
 25226 probe object-descriptors
+
+# Spatial contract coverage: local save coordinates, semantic geometry, doors,
+# collision edges, indoor fallback, connected layouts, and sub-metatile motion.
+25227 warp 26 14 3 54
+25427 screenshot frontier-pokemon-center
+25427 probe state
+25427 probe map-grid
+25428 button up on
+25432 screenshot frontier-pokemon-center-subtile-4
+25436 screenshot frontier-pokemon-center-subtile-8
+25440 screenshot frontier-pokemon-center-subtile-12
+25444 screenshot frontier-pokemon-center-subtile-16
+25476 button up off
+25626 screenshot frontier-pokemon-center-door
+25626 probe state
+
+25627 warp 26 42 7 8
+25827 view classic
+25827 screenshot exchange-corner-classic
+25827 view hd2d
+25827 screenshot exchange-corner-hd2d
+25827 probe state
+
+25828 warp 0 4 5 9
+26028 screenshot fortree-buildings
+26028 probe map-grid
+26029 button up on
+26033 screenshot fortree-subtile-4
+26037 screenshot fortree-subtile-8
+26041 screenshot fortree-subtile-12
+26045 screenshot fortree-subtile-16
+26061 button up off
+
+26062 warp 0 14 19 10
+26262 screenshot verdanturf-route117-seam
+26262 probe map-grid
+26263 button right on
+26267 screenshot verdanturf-seam-subtile-4
+26271 screenshot verdanturf-seam-subtile-8
+26275 screenshot verdanturf-seam-subtile-12
+26279 screenshot verdanturf-seam-subtile-16
+26303 button right off
+26304 probe state
+
+26305 warp 0 15 8 18
+26505 screenshot pacifidlog-buildings
+26505 probe map-grid
+26506 button up on
+26510 screenshot pacifidlog-subtile-4
+26514 screenshot pacifidlog-subtile-8
+26518 screenshot pacifidlog-subtile-12
+26522 screenshot pacifidlog-subtile-16
+26554 button up off
+26704 screenshot pacifidlog-pokemon-center-door
+26704 probe state
+
+26705 warp 26 14 1 52
+26905 screenshot frontier-pokemon-center-collision-edge
+26906 button up on
+26926 button up off
+26927 probe state
+26928 button right on
+26932 screenshot frontier-collision-edge-subtile-4
+26936 screenshot frontier-collision-edge-subtile-8
+26940 screenshot frontier-collision-edge-subtile-12
+26944 screenshot frontier-collision-edge-subtile-16
+26976 button right off
+26977 screenshot frontier-pokemon-center-edge-walked
+26977 probe state

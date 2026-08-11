@@ -1032,23 +1032,27 @@ static const u8 *HdTilesetPixels(const struct Tileset *tileset)
     return cache->tiles;
 }
 
-static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
+static bool8 ResolveHdMapSample(s32 localX, s32 localY, struct HdMapSample *sample)
 {
     const struct MapLayout *current = gMapHeader.mapLayout;
-    const s32 localX = mapX - MAP_OFFSET;
-    const s32 localY = mapY - MAP_OFFSET;
+    const s32 gridX = localX + MAP_OFFSET;
+    const s32 gridY = localY + MAP_OFFSET;
 
     sample->layout = current;
     sample->collision = 0;
     sample->valid = FALSE;
     if (localX >= 0 && localY >= 0 && localX < current->width && localY < current->height)
     {
-        const u16 block = gBackupMapLayout.map[mapY * gBackupMapLayout.width + mapX];
+        u16 block = MAPGRID_UNDEFINED;
+
+        if (gridX >= 0 && gridY >= 0
+         && gridX < gBackupMapLayout.width && gridY < gBackupMapLayout.height)
+            block = gBackupMapLayout.map[gridY * gBackupMapLayout.width + gridX];
 
         if (block == MAPGRID_UNDEFINED)
         {
-            sample->metatileId = MapGridGetMetatileIdAt(mapX, mapY);
-            sample->collision = MapGridGetCollisionAt(mapX, mapY);
+            sample->metatileId = MapGridGetMetatileIdAt(gridX, gridY);
+            sample->collision = MapGridGetCollisionAt(gridX, gridY);
         }
         else
         {
@@ -1103,8 +1107,8 @@ static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
             }
         }
     }
-    sample->metatileId = MapGridGetMetatileIdAt(mapX, mapY);
-    sample->collision = MapGridGetCollisionAt(mapX, mapY);
+    sample->metatileId = MapGridGetMetatileIdAt(gridX, gridY);
+    sample->collision = MapGridGetCollisionAt(gridX, gridY);
     return FALSE;
 }
 
@@ -1970,6 +1974,9 @@ u32 WasmDisplaySceneKind(void)
     if (gMain.callback2 != CB2_Overworld)
         return 0;
     if (gMapHeader.mapType == MAP_TYPE_NONE)
+        return 0;
+    if (gMapHeader.mapType == MAP_TYPE_INDOOR
+     || gMapHeader.mapType == MAP_TYPE_SECRET_BASE)
         return 0;
     RefreshHblankDmaGpuRegs();
     for (u32 offset = 0; offset < REG_OFFSET_DMA0; offset += 2)
