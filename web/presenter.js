@@ -1,3 +1,20 @@
+const HD2D_SURFACE_BITS = 3;
+const HD2D_SURFACE_GROUND = 0;
+export const HD2D_SURFACE_WATER = 1;
+export const HD2D_SURFACE_DECK = 2;
+export const HD2D_SURFACE_TERRAIN = 3;
+export const HD2D_SURFACE_OBSTACLE = 4;
+const HD2D_SURFACE_WALL = 5;
+const HD2D_SURFACE_ROOF = 6;
+export const HD2D_SURFACE_OPEN_DECK = 7;
+export const HD2D_SURFACE_MASK = (1 << HD2D_SURFACE_BITS) - 1;
+const HD2D_COMPONENT_SHIFT = HD2D_SURFACE_BITS;
+const HD2D_RECEIVER_VALID = 0x8000;
+const HD2D_RECEIVER_OFFSET_BIAS = 16;
+const HD2D_RECEIVER_OFFSET_MASK = 31;
+const HD2D_RECEIVER_DX_SHIFT = HD2D_SURFACE_BITS;
+const HD2D_RECEIVER_DY_SHIFT = 8;
+
 const FULLSCREEN_VERTEX = /* wgsl */ `
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -933,33 +950,23 @@ class WebGpuPresenter {
     const heightAt = (x, y) => inGrid(x, y) ? heights[y * cols + x] : 0;
     const geometryAt = (x, y) => inGrid(x, y) ? geometry[y * cols + x] : 0;
     const receiverAt = (x, y) => inGrid(x, y) ? receivers[y * cols + x] : 0;
-    const surfaceAt = (x, y) => geometryAt(x, y) & 7;
-    const componentAt = (x, y) => geometryAt(x, y) >> 3;
+    const surfaceAt = (x, y) => geometryAt(x, y) & HD2D_SURFACE_MASK;
+    const componentAt = (x, y) => geometryAt(x, y) >> HD2D_COMPONENT_SHIFT;
     const worldX = (x) => originX + x * TILE_SIZE - halfW;
     const worldZ = (y) => originY + y * TILE_SIZE - halfH;
     const textureU = (x) => Math.max(0, Math.min(this.worldWidth, originX + x * TILE_SIZE)) / this.worldWidth;
     const textureV = (y) => Math.max(0, Math.min(this.worldHeight, originY + y * TILE_SIZE)) / this.worldHeight;
     const pixelU = (pixel) => (Math.max(0, Math.min(this.worldWidth - 1, pixel)) + 0.5) / this.worldWidth;
     const pixelV = (pixel) => (Math.max(0, Math.min(this.worldHeight - 1, pixel)) + 0.5) / this.worldHeight;
-    const SURFACE_WALL = 5;
-    const SURFACE_ROOF = 6;
-    const SURFACE_WATER = 1;
-    const SURFACE_OPEN_DECK = 7;
     const MATERIAL_NEUTRAL_BUILDING = 8;
-    const RECEIVER_VALID = 0x8000;
-    const RECEIVER_SURFACE_MASK = 7;
-    const RECEIVER_OFFSET_MASK = 31;
-    const RECEIVER_OFFSET_BIAS = 16;
-    const RECEIVER_DX_SHIFT = 3;
-    const RECEIVER_DY_SHIFT = 8;
 
     const openDeckReceiver = (tx, ty) => {
       const word = receiverAt(tx, ty);
-      if ((word & RECEIVER_VALID) === 0) return null;
-      const sourceX = tx + (((word >> RECEIVER_DX_SHIFT) & RECEIVER_OFFSET_MASK) - RECEIVER_OFFSET_BIAS);
-      const sourceY = ty + (((word >> RECEIVER_DY_SHIFT) & RECEIVER_OFFSET_MASK) - RECEIVER_OFFSET_BIAS);
+      if ((word & HD2D_RECEIVER_VALID) === 0) return null;
+      const sourceX = tx + (((word >> HD2D_RECEIVER_DX_SHIFT) & HD2D_RECEIVER_OFFSET_MASK) - HD2D_RECEIVER_OFFSET_BIAS);
+      const sourceY = ty + (((word >> HD2D_RECEIVER_DY_SHIFT) & HD2D_RECEIVER_OFFSET_MASK) - HD2D_RECEIVER_OFFSET_BIAS);
       if (!inGrid(sourceX, sourceY)) return null;
-      return [sourceX, sourceY, heightAt(sourceX, sourceY), word & RECEIVER_SURFACE_MASK];
+      return [sourceX, sourceY, heightAt(sourceX, sourceY), word & HD2D_SURFACE_MASK];
     };
 
     // A vertical face is an extrusion of the authored lower surface beside an
@@ -1023,9 +1030,9 @@ class WebGpuPresenter {
         const start = ty * cols + tx;
         if (visited[start]) continue;
         visited[start] = 1;
-        if (surfaceAt(tx, ty) === SURFACE_WALL) {
+        if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL) {
           let sourceY = ty + 1;
-          while (sourceY < rows && surfaceAt(tx, sourceY) === SURFACE_WALL
+          while (sourceY < rows && surfaceAt(tx, sourceY) === HD2D_SURFACE_WALL
               && componentAt(tx, sourceY) === componentAt(tx, ty)) sourceY++;
           sourceY = Math.min(rows - 1, sourceY);
           const ground = groundHeights[start];
@@ -1062,8 +1069,8 @@ class WebGpuPresenter {
           for (let x = 0; x < width; x++)
             visited[(ty + y) * cols + tx + x] = 1;
         }
-        const shell = surfaceAt(tx, ty) === SURFACE_ROOF && componentAt(tx, ty) !== 0;
-        if (surfaceAt(tx, ty) === SURFACE_OPEN_DECK) {
+        const shell = surfaceAt(tx, ty) === HD2D_SURFACE_ROOF && componentAt(tx, ty) !== 0;
+        if (surfaceAt(tx, ty) === HD2D_SURFACE_OPEN_DECK) {
           for (let y = 0; y < depth; y++) {
             for (let x = 0; x < width; x++) {
               const source = openDeckReceiver(tx + x, ty + y);
@@ -1110,7 +1117,7 @@ class WebGpuPresenter {
           components.set(id, component);
         }
         component.base = Math.min(component.base, groundHeights[ty * cols + tx]);
-        if (surfaceAt(tx, ty) === SURFACE_ROOF) {
+        if (surfaceAt(tx, ty) === HD2D_SURFACE_ROOF) {
           component.roofHeight = Math.max(component.roofHeight, heightAt(tx, ty));
           component.roofCells.push([tx, ty]);
         }
@@ -1118,18 +1125,18 @@ class WebGpuPresenter {
     }
 
     const sameRoof = (x, y, id) => inGrid(x, y)
-      && surfaceAt(x, y) === SURFACE_ROOF && componentAt(x, y) === id;
+      && surfaceAt(x, y) === HD2D_SURFACE_ROOF && componentAt(x, y) === id;
     const facadeVisited = new Uint8Array(cols * rows);
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
         const start = ty * cols + tx;
         const id = componentAt(tx, ty);
-        if (!id || surfaceAt(tx, ty) !== SURFACE_WALL || facadeVisited[start]) continue;
+        if (!id || surfaceAt(tx, ty) !== HD2D_SURFACE_WALL || facadeVisited[start]) continue;
         let width = 1;
         while (tx + width < cols) {
           const tile = ty * cols + tx + width;
           if (facadeVisited[tile] || componentAt(tx + width, ty) !== id
-              || surfaceAt(tx + width, ty) !== SURFACE_WALL) break;
+              || surfaceAt(tx + width, ty) !== HD2D_SURFACE_WALL) break;
           width++;
         }
         let depth = 1;
@@ -1137,7 +1144,7 @@ class WebGpuPresenter {
           for (let x = 0; x < width; x++) {
             const tile = (ty + depth) * cols + tx + x;
             if (facadeVisited[tile] || componentAt(tx + x, ty + depth) !== id
-                || surfaceAt(tx + x, ty + depth) !== SURFACE_WALL) break depthLoop;
+                || surfaceAt(tx + x, ty + depth) !== HD2D_SURFACE_WALL) break depthLoop;
           }
           depth++;
         }
@@ -1166,7 +1173,7 @@ class WebGpuPresenter {
           [x1, component.base, z, textureU(tx + width), textureV(ty + depth)],
           [x1, top, z, textureU(tx + width), vTop],
           [x0, top, z, textureU(tx), vTop],
-          [0, 0, 1], SURFACE_WALL, 1, component.base,
+          [0, 0, 1], HD2D_SURFACE_WALL, 1, component.base,
         );
         component.roofHeight = Math.max(component.roofHeight, top);
         component.wallRects.push([tx, ty, width, depth, top]);
@@ -1265,7 +1272,7 @@ class WebGpuPresenter {
             [worldX(tx + width),top,worldZ(ty),textureU(tx + width),textureV(sourceY)],
             [worldX(tx + width),top,worldZ(ty + depth),textureU(tx + width),textureV(sourceY + 1)],
             [worldX(tx),top,worldZ(ty + depth),textureU(tx),textureV(sourceY + 1)],
-            [0, 1, 0], SURFACE_ROOF, 1, component.base,
+            [0, 1, 0], HD2D_SURFACE_ROOF, 1, component.base,
           );
           continue;
         }
@@ -1278,7 +1285,7 @@ class WebGpuPresenter {
             [worldX(tx + x + 1),top,worldZ(ty),textureU(sourceX + 1),textureV(sourceY)],
             [worldX(tx + x + 1),top,worldZ(ty + depth),textureU(sourceX + 1),textureV(sourceY + 1)],
             [worldX(tx + x),top,worldZ(ty + depth),textureU(sourceX),textureV(sourceY + 1)],
-            [0, 1, 0], SURFACE_ROOF, 1, component.base,
+            [0, 1, 0], HD2D_SURFACE_ROOF, 1, component.base,
           );
         }
       }
@@ -1289,7 +1296,7 @@ class WebGpuPresenter {
         // second skin.
         for (const dx of [-1, 1]) {
           const neighborIsShell = sameRoof(tx + dx, ty, component.id)
-            || (inGrid(tx + dx, ty) && surfaceAt(tx + dx, ty) === SURFACE_WALL
+            || (inGrid(tx + dx, ty) && surfaceAt(tx + dx, ty) === HD2D_SURFACE_WALL
               && componentAt(tx + dx, ty) === component.id);
           if (neighborIsShell) continue;
           const bottom = Math.max(component.base, heightAt(tx + dx, ty));
@@ -1299,7 +1306,7 @@ class WebGpuPresenter {
                        1, component.base, component.sideMaterial);
         }
         const northIsShell = sameRoof(tx, ty - 1, component.id)
-          || (inGrid(tx, ty - 1) && surfaceAt(tx, ty - 1) === SURFACE_WALL
+          || (inGrid(tx, ty - 1) && surfaceAt(tx, ty - 1) === HD2D_SURFACE_WALL
             && componentAt(tx, ty - 1) === component.id);
         if (!northIsShell) {
           const bottom = Math.max(component.base, heightAt(tx, ty - 1));
@@ -1327,7 +1334,7 @@ class WebGpuPresenter {
         for (const dy of [-1, 1]) {
           if (sameRoof(tx, ty + dy, component.id)) continue;
           if (dy > 0 && componentAt(tx, ty + 1) === component.id
-              && surfaceAt(tx, ty + 1) === SURFACE_WALL) continue;
+              && surfaceAt(tx, ty + 1) === HD2D_SURFACE_WALL) continue;
           const bottom = Math.max(component.base, heightAt(tx, ty + dy));
           if (bottom >= height) continue;
           verticalSide(tx, ty, bottom, height, tx, ty, 0, dy,
@@ -1344,8 +1351,8 @@ class WebGpuPresenter {
       const surface = surfaceAt(tx, ty);
       const height = heightAt(tx, ty);
       const bottom = heightAt(tx + dx, ty + dy);
-      return surface !== SURFACE_ROOF && surface !== SURFACE_WALL
-        && surface !== SURFACE_OPEN_DECK && bottom < height
+      return surface !== HD2D_SURFACE_ROOF && surface !== HD2D_SURFACE_WALL
+        && surface !== HD2D_SURFACE_OPEN_DECK && bottom < height
         ? { height, bottom } : null;
     };
     for (const dy of [-1, 1]) {

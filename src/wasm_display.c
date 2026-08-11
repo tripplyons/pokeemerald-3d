@@ -38,9 +38,13 @@ extern void WasmApplyTilesetAnimations(const struct Tileset *tileset, u8 *dest, 
 #define HD2D_COURSE_COLS (HD2D_SAMPLE_COLS * 2)
 #define HD2D_COURSE_ROWS (HD2D_SAMPLE_ROWS * 2)
 #define HD2D_COURSE_COUNT (HD2D_COURSE_COLS * HD2D_COURSE_ROWS)
+#define HD2D_SURFACE_BITS 3
+#define HD2D_SURFACE_MASK ((1 << HD2D_SURFACE_BITS) - 1)
+#define HD2D_COMPONENT_SHIFT HD2D_SURFACE_BITS
+#define HD2D_COMPONENT_MAX (0xffff >> HD2D_COMPONENT_SHIFT)
 #define HD2D_RECEIVER_VALID 0x8000
 #define HD2D_RECEIVER_OFFSET_BIAS 16
-#define HD2D_RECEIVER_DX_SHIFT 3
+#define HD2D_RECEIVER_DX_SHIFT HD2D_SURFACE_BITS
 #define HD2D_RECEIVER_DY_SHIFT 8
 #define HD2D_BUILDING_COUNT (HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS)
 #define HD2D_WORLD_OFFSET_X ((HD2D_WORLD_WIDTH - DISPLAY_WIDTH) / 2)
@@ -67,6 +71,9 @@ enum HdSurface
     HD_SURFACE_ROOF,
     HD_SURFACE_OPEN_DECK = 7,
 };
+
+typedef char HdSurfaceOpenDeckFitsPackedGeometry[
+    HD_SURFACE_OPEN_DECK <= HD2D_SURFACE_MASK ? 1 : -1];
 
 #define LAYER_BG0 0x01
 #define LAYER_BG1 0x02
@@ -1392,15 +1399,6 @@ static bool8 HdMapSampleIsCoveredCourse(u32 index)
         && UNPACK_LAYER_TYPE(sHdMapAttributes[index]) == METATILE_LAYER_TYPE_COVERED;
 }
 
-static bool8 HdMapSampleIsWallCandidate(u32 index)
-{
-    if (!sHdMapSamples[index].valid)
-        return FALSE;
-    if (HdMapSampleIsDoorCourse(index) || HdMapSampleIsCoveredCourse(index))
-        return TRUE;
-    return FALSE;
-}
-
 static bool8 HdMapSampleIsStructuralMaterial(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
@@ -1481,41 +1479,35 @@ static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
           + HdMetatileCoverage(&sHdMapSamples[index], 1) != 0);
 }
 
-static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols)
+static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRows)
 {
     if (index < sampleCols
-     || index + sampleCols >= HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS)
+     || index + sampleCols >= sampleCols * sampleRows
+     || !sHdMapSamples[index].valid)
         return FALSE;
-    return HdMapSampleIsWallCandidate(index)
+    return (HdMapSampleIsDoorCourse(index) || HdMapSampleIsCoveredCourse(index))
         && HdMapSampleIsOpaqueBlocked(index - sampleCols)
         && sHdMapSamples[index + sampleCols].valid
         && !sHdMapSamples[index + sampleCols].collision;
 }
 
-static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols)
+static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols, u32 sampleRows)
 {
-    return HdMapSampleHasFacadeSupport(index, sampleCols)
+    return HdMapSampleHasFacadeSupport(index, sampleCols, sampleRows)
         && (sHdMapSamples[index].collision
          || HdMapSampleHasTopArt(index)
          || HdMapSampleIsDoorCourse(index)
          || sHdMapSamples[index].hasWarpEntrance);
 }
 
-static bool8 HdMapSampleIsFacadeSpanCell(u32 index, u32 sampleCols)
-{
-    // Facade spans may contain weak wall courses that lack collision or top
-    // coverage, but they still need the authored wall relationship above and a
-    // walkable course below so paths and flowerbeds do not grow shell sides.
-    return HdMapSampleHasFacadeSupport(index, sampleCols);
-}
-
-static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX, u32 sampleCols)
+static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
+                                     u32 sampleCols, u32 sampleRows)
 {
     for (u32 x = startX; x <= endX; x++)
     {
         const u32 index = row * sampleCols + x;
 
-        if (!HdMapSampleHasFacadeSupport(index, sampleCols))
+        if (!HdMapSampleHasFacadeSupport(index, sampleCols, sampleRows))
             return FALSE;
     }
     return TRUE;
@@ -1589,27 +1581,21 @@ static struct HdAdjacentSampleEvidence HdSampleAdjacentEvidence(u32 index,
         behavior = UNPACK_BEHAVIOR(sHdMapAttributes[neighbor]);
         if (behavior == MB_REFLECTION_UNDER_BRIDGE)
             evidence.touchesReflection = TRUE;
-        if (HdBehaviorIsWaterSurface(behavior))
         {
+            const bool8 isWater = HdBehaviorIsWaterSurface(behavior);
+            const bool8 isOpenDeck = HdBehaviorIsOpenDeck(behavior);
+            const bool8 usesWaterReceiver = HdBehaviorOpenDeckUsesWaterReceiver(behavior);
+
+            if (!isWater && !isOpenDeck && !usesWaterReceiver)
+                continue;
             if (!HdMetatilesHaveSameVisibleArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
                 continue;
-            evidence.matchingWaterArt = TRUE;
-            if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
+            if (isWater)
+                evidence.matchingWaterArt = TRUE;
+            if (isOpenDeck)
+                evidence.matchingOpenDeckArt = TRUE;
+            if (usesWaterReceiver)
                 evidence.matchingWaterReceiverArt = TRUE;
-        }
-        else if (HdBehaviorIsOpenDeck(behavior))
-        {
-            if (!HdMetatilesHaveSameVisibleArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
-                continue;
-            evidence.matchingOpenDeckArt = TRUE;
-            if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
-                evidence.matchingWaterReceiverArt = TRUE;
-        }
-        else if (HdBehaviorOpenDeckUsesWaterReceiver(behavior))
-        {
-            if (!HdMetatilesHaveSameVisibleArt(&sHdMapSamples[index], &sHdMapSamples[neighbor]))
-                continue;
-            evidence.matchingWaterReceiverArt = TRUE;
         }
     }
     return evidence;
@@ -1682,7 +1668,7 @@ static s8 HdSurfaceBaseHeight(u8 surface)
 static u16 HdPackOpenDeckReceiver(u8 surface, s32 dx, s32 dy)
 {
     return HD2D_RECEIVER_VALID
-        | (surface & 7)
+        | (surface & HD2D_SURFACE_MASK)
         | ((dx + HD2D_RECEIVER_OFFSET_BIAS) << HD2D_RECEIVER_DX_SHIFT)
         | ((dy + HD2D_RECEIVER_OFFSET_BIAS) << HD2D_RECEIVER_DY_SHIFT);
 }
@@ -1738,7 +1724,7 @@ static void HdResolveOpenDeckReceivers(u32 courseCols, u32 courseRows)
             bool8 useWaterReceiver;
 
             sHdCourseReceivers[course] = 0;
-            if ((sHdCourseGeometry[course] & 7) != HD_SURFACE_OPEN_DECK)
+            if ((sHdCourseGeometry[course] & HD2D_SURFACE_MASK) != HD_SURFACE_OPEN_DECK)
                 continue;
             useWaterReceiver = HdSampleOpenDeckUsesWaterReceiver(courseX / 2,
                                                                  courseY / 2,
@@ -1762,11 +1748,11 @@ static void HdResolveOpenDeckReceivers(u32 courseCols, u32 courseRows)
                          || sourceX >= (s32)courseCols || sourceY >= (s32)courseRows)
                             continue;
                         source = sourceY * courseCols + sourceX;
-                        if (HdOpenDeckReceiverSurfaceMatches(sHdCourseGeometry[source] & 7,
+                        if (HdOpenDeckReceiverSurfaceMatches(sHdCourseGeometry[source] & HD2D_SURFACE_MASK,
                                                              useWaterReceiver)
                          && sHdCourseHeights[source] < sHdCourseHeights[course])
                         {
-                            sHdCourseReceivers[course] = HdPackOpenDeckReceiver(sHdCourseGeometry[source] & 7,
+                            sHdCourseReceivers[course] = HdPackOpenDeckReceiver(sHdCourseGeometry[source] & HD2D_SURFACE_MASK,
                                                                                 dx, dy);
                             goto nextCourse;
                         }
@@ -1933,29 +1919,29 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
             s16 roofHeight;
             u16 building;
 
-            if (!HdMapSampleIsSupportedWallCore(y * sampleCols + x, sampleCols))
+            if (!HdMapSampleIsSupportedWallCore(y * sampleCols + x, sampleCols, sampleRows))
             {
                 x++;
                 continue;
             }
             coreStart = x;
             while (x + 1 < sampleCols
-                && HdMapSampleIsSupportedWallCore(y * sampleCols + x + 1, sampleCols))
+                && HdMapSampleIsSupportedWallCore(y * sampleCols + x + 1, sampleCols, sampleRows))
                 x++;
             coreEnd = x;
 
             spanStart = coreStart;
             spanEnd = coreEnd;
             while (spanStart > 0
-                && HdMapSampleIsFacadeSpanCell(y * sampleCols + spanStart - 1, sampleCols))
+                && HdMapSampleHasFacadeSupport(y * sampleCols + spanStart - 1, sampleCols, sampleRows))
                 spanStart--;
             while (spanEnd + 1 < sampleCols
-                && HdMapSampleIsFacadeSpanCell(y * sampleCols + spanEnd + 1, sampleCols))
+                && HdMapSampleHasFacadeSupport(y * sampleCols + spanEnd + 1, sampleCols, sampleRows))
                 spanEnd++;
 
             wallTop = y;
             while (wallTop > 1 && y - wallTop < HD2D_GEOMETRY_RADIUS
-                && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols))
+                && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows))
                 wallTop--;
             wallStartCourse = (wallTop - 1) * 2 + 1;
             wallEndCourse = y * 2 + 2;
@@ -2028,13 +2014,14 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
                 continue;
             if (sHdBuildings[root].componentId == 0)
             {
-                if (nextComponent > (0xffff >> 3))
+                if (nextComponent > HD2D_COMPONENT_MAX)
                     continue;
                 sHdBuildings[root].componentId = nextComponent++;
             }
             surface = sHdCourseBuildingKind[course] & HD_BUILDING_WALL
                 ? HD_SURFACE_WALL : HD_SURFACE_ROOF;
-            sHdCourseGeometry[course] = (sHdBuildings[root].componentId << 3) | surface;
+            sHdCourseGeometry[course] = (sHdBuildings[root].componentId << HD2D_COMPONENT_SHIFT)
+                                      | surface;
             sHdCourseGroundHeights[course] = sHdBuildings[root].base;
             sHdCourseHeights[course] = surface == HD_SURFACE_ROOF
                 ? sHdBuildings[root].roofHeight : sHdBuildings[root].base;

@@ -1,4 +1,12 @@
-import { createPresenter } from './presenter.js';
+import {
+  HD2D_SURFACE_DECK,
+  HD2D_SURFACE_MASK,
+  HD2D_SURFACE_OBSTACLE,
+  HD2D_SURFACE_OPEN_DECK,
+  HD2D_SURFACE_TERRAIN,
+  HD2D_SURFACE_WATER,
+  createPresenter,
+} from './presenter.js';
 
 const WIDTH = 240;
 const HEIGHT = 160;
@@ -1771,15 +1779,15 @@ function automationHeightMap() {
   const pixels = new Uint8ClampedArray(worldWidth * worldHeight * 4);
   for (let i = 0; i < worldWidth * worldHeight; i++) {
     const value = Math.max(0, Math.min(255, Math.round((heights[i] + 8) * 255 / 40)));
-    const surface = geometry[i] & 7;
+    const surface = geometry[i] & HD2D_SURFACE_MASK;
     let red = value;
     let green = value;
     let blue = value;
-    if (surface === 1) { red = value * 0.3; green = value * 0.5; blue = 255; }
-    else if (surface === 2) { red = 255; green = value * 0.4; blue = value * 0.4; }
-    else if (surface === 3) { red = value * 0.3; green = 255; blue = value * 0.3; }
-    else if (surface === 4) { red = 255; green = 255; blue = value * 0.3; }
-    else if (surface === 7) { red = value * 0.8; green = 255; blue = value * 0.6; }
+    if (surface === HD2D_SURFACE_WATER) { red = value * 0.3; green = value * 0.5; blue = 255; }
+    else if (surface === HD2D_SURFACE_DECK) { red = 255; green = value * 0.4; blue = value * 0.4; }
+    else if (surface === HD2D_SURFACE_TERRAIN) { red = value * 0.3; green = 255; blue = value * 0.3; }
+    else if (surface === HD2D_SURFACE_OBSTACLE) { red = 255; green = 255; blue = value * 0.3; }
+    else if (surface === HD2D_SURFACE_OPEN_DECK) { red = value * 0.8; green = 255; blue = value * 0.6; }
     pixels[i * 4] = red;
     pixels[i * 4 + 1] = green;
     pixels[i * 4 + 2] = blue;
