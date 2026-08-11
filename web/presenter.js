@@ -144,7 +144,6 @@ struct VertexInput {
   @location(1) uv: vec2f,
   @location(2) normal: vec3f,
   @location(3) material: f32,
-  @location(4) shell: vec2f,
 }
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -169,14 +168,10 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
   let zoom = camera.values.y;
   let zoomOut = 0.30 * zoom + 0.76923077 * zoom * zoom * (zoom - 0.35);
   let focal = cameraHeight / (1.0 + zoomOut);
-  let shellBase = input.shell.y;
-  let ordinaryViewY = input.position.y * sine - input.position.z * cosine;
-  let shellViewY = shellBase * sine - input.position.z * cosine
-    + input.position.y - shellBase;
-  let viewY = select(ordinaryViewY, shellViewY, input.shell.x > 0.5);
-  let ordinaryDepth = cameraHeight - input.position.y * cosine - input.position.z * sine;
-  let shellDepth = cameraHeight - shellBase * cosine - input.position.z * sine;
-  let depth = select(ordinaryDepth, shellDepth, input.shell.x > 0.5);
+  // Roofs, facades, and terrain must share one camera. Keeping facades aligned
+  // in screen space creates a second projection and a visible seam at roofs.
+  let viewY = input.position.y * sine - input.position.z * cosine;
+  let depth = cameraHeight - input.position.y * cosine - input.position.z * sine;
   let near = camera.viewport.z;
   let far = camera.viewport.w;
   var output: VertexOutput;
@@ -1361,21 +1356,6 @@ class WebGpuPresenter {
     };
   }
 
-  shellProjection(x, y, z, base, tilt, zoom) {
-    const angle = CAMERA_TILT_DEGREES * tilt * Math.PI / 180;
-    const sine = Math.sin(angle);
-    const cosine = Math.cos(angle);
-    const zoomOut = 0.30 * zoom + 0.76923077 * zoom * zoom * (zoom - 0.35);
-    const focal = CAMERA_HEIGHT / (1 + zoomOut);
-    const viewY = base * sine - z * cosine + y - base;
-    const cameraDepth = CAMERA_HEIGHT - base * cosine - z * sine;
-    return {
-      x: this.width / 2 + x * focal / cameraDepth,
-      y: this.height / 2 - viewY * focal / cameraDepth,
-      cameraDepth,
-    };
-  }
-
   actorOccludedByShell(actor, tilt, zoom) {
     // Route the complete owning actor only when its grouped projected cards
     // actually cover a shell. World X/Z alone made separated cards become
@@ -1395,7 +1375,8 @@ class WebGpuPresenter {
       for (const x of [component.x0, component.x1]) {
         for (const y of [component.base, component.roofHeight]) {
           for (const z of [component.minZ, component.frontZ]) {
-            const point = this.shellProjection(x, y, z, component.base, tilt, zoom);
+            // Match the terrain shader exactly when testing projected overlap.
+            const point = this.cameraProjection(x, y, z, tilt, zoom);
             bounds.x0 = Math.min(bounds.x0, point.x);
             bounds.x1 = Math.max(bounds.x1, point.x);
             bounds.y0 = Math.min(bounds.y0, point.y);
