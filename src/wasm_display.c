@@ -1449,8 +1449,12 @@ static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
         return HD_SURFACE_WATER;
     if (HdMapSampleIsTerrainCourse(index, sampleX, sampleY, sampleCols))
         return HD_SURFACE_TERRAIN;
+    // Only cells with top-plane art obstruct. Bottom-plane-only collision
+    // tiles (border hedges, fences) render flat in the classic view, so
+    // extruding them as obstacles produces spurious side faces that sample
+    // adjacent pavement instead of their own art.
     if (sample->collision
-     && HdMetatileCoverage(sample, 0) + HdMetatileCoverage(sample, 1) != 0)
+     && HdMetatileCoverage(sample, 1) != 0)
         return HD_SURFACE_OBSTACLE;
     return HD_SURFACE_GROUND;
 }
