@@ -1319,6 +1319,35 @@ static bool8 HdCourseHasTopArt(u32 courseX, u32 courseY, u32 sampleCols)
         && HdMetatileQuadrantCoverage(&sHdMapSamples[sample], 1, quadrant) != 0;
 }
 
+static bool8 HdCourseIsRoofCandidate(u32 courseX, u32 courseY, u32 sampleCols,
+                                     u32 sampleRows)
+{
+    const u32 sampleX = courseX / 2;
+    const u32 sampleY = courseY / 2;
+    const u32 sample = sampleY * sampleCols + sampleX;
+
+    // A roof cap may use normal-layer art one sample above its covered/door
+    // facade. Keep that authored relationship, rather than allowing any top
+    // art to seed a building component; collision also excludes walkable
+    // paths that happen to use covered-layer art.
+    if (!HdCourseHasTopArt(courseX, courseY, sampleCols)
+     || !sHdMapSamples[sample].collision
+     || !HdMapSampleIsStructuralMaterial(sample))
+        return FALSE;
+    if (HdMapSampleIsDoorCourse(sample) || HdMapSampleIsCoveredCourse(sample))
+        return TRUE;
+    if (sampleY + 1 < sampleRows)
+    {
+        const u32 below = (sampleY + 1) * sampleCols + sampleX;
+
+        if (sHdMapSamples[below].valid
+         && HdMapSampleIsStructuralMaterial(below)
+         && (HdMapSampleIsDoorCourse(below) || HdMapSampleIsCoveredCourse(below)))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static bool8 HdMapSampleIsTerrainWallCandidate(u32 index, u32 sampleX, u32 sampleCols)
 {
     if (!HdMapSampleIsCoveredCourse(index))
@@ -1509,7 +1538,8 @@ static void HdClaimBuildingCourse(u32 courseX, u32 courseY, u32 courseCols,
 }
 
 static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
-                                u32 spanEnd, u32 sampleCols, u32 courseCols)
+                                u32 spanEnd, u32 sampleCols, u32 sampleRows,
+                                u32 courseCols)
 {
     const u32 minY = seedY > HD2D_GEOMETRY_RADIUS * 2
         ? seedY - HD2D_GEOMETRY_RADIUS * 2 : 0;
@@ -1520,6 +1550,9 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
     for (u32 courseX = spanStart; courseX < spanEnd; courseX++)
     {
         const u32 course = seedY * courseCols + courseX;
+
+        if (!HdCourseIsRoofCandidate(courseX, seedY, sampleCols, sampleRows))
+            continue;
         sHdCourseVisit[course] = visit;
         sHdCourseQueue[queueEnd++] = course;
     }
@@ -1534,7 +1567,8 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
         HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_ROOF);
         if (courseY == minY)
         {
-            if (courseY > 0 && HdCourseHasTopArt(courseX, courseY - 1, sampleCols))
+            if (courseY > 0
+             && HdCourseIsRoofCandidate(courseX, courseY - 1, sampleCols, sampleRows))
                 sHdBuildings[building].truncated = TRUE;
             continue;
         }
@@ -1547,7 +1581,7 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
                 continue;
             next = nextY[direction] * courseCols + nextX[direction];
             if (sHdCourseVisit[next] == visit
-             || !HdCourseHasTopArt(nextX[direction], nextY[direction], sampleCols))
+             || !HdCourseIsRoofCandidate(nextX[direction], nextY[direction], sampleCols, sampleRows))
                 continue;
             sHdCourseVisit[next] = visit;
             sHdCourseQueue[queueEnd++] = next;
@@ -1648,7 +1682,7 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
                     HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
             }
             HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
-                                spanEndCourse, sampleCols, courseCols);
+                                spanEndCourse, sampleCols, sampleRows, courseCols);
             x = spanEnd + 1;
         }
     }
