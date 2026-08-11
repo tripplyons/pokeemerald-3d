@@ -610,6 +610,9 @@ class WebGpuPresenter {
     this.terrainOriginY = 0;
     this.terrainSignature = null;
     this.terrainVertexCount = 0;
+    this.terrainRevision = 0;
+    this.structuralShadowTerrainRevision = -1;
+    this.structuralShadowLightTransform = null;
     this.sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest', mipmapFilter: 'nearest' });
     this.structuralShadowSampler = device.createSampler({
       compare: 'less-equal', magFilter: 'linear', minFilter: 'linear',
@@ -1213,6 +1216,7 @@ class WebGpuPresenter {
     this.device.queue.writeBuffer(this.vertexBuffer, 0, data);
     this.terrainSignature = signature;
     this.terrainVertexCount = data.length / VERTEX_FLOATS;
+    this.terrainRevision++;
     return this.terrainVertexCount;
   }
 
@@ -1539,28 +1543,35 @@ class WebGpuPresenter {
       this.writeObjectSources(objectSourcePixels, objectSourceCount);
       this.writeTexture(this.bgPriorityTexture, bgPriorities, this.worldWidth, this.worldHeight, 1);
       this.writeTexture(this.uiTexture, this.uiPixels);
+      const lightTransform = this.createLightTransform(worldPixelOriginX, worldPixelOriginY);
       const cameraValues = new Float32Array(28);
       cameraValues.set([
         perspective, zoom, shading, CAMERA_HEIGHT,
         this.width, this.height, CAMERA_NEAR, CAMERA_FAR,
         worldPixelOriginX, worldPixelOriginY, optics, 0,
       ]);
-      cameraValues.set(this.createLightTransform(worldPixelOriginX, worldPixelOriginY), 12);
+      cameraValues.set(lightTransform, 12);
       this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraValues);
 
-      const structuralShadowPass = encoder.beginRenderPass({
-        label: 'world-anchored structural shadow map pass',
-        colorAttachments: [],
-        depthStencilAttachment: {
-          view: this.structuralShadowTexture.createView(),
-          depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store',
-        },
-      });
-      structuralShadowPass.setPipeline(this.structuralShadowPipeline);
-      structuralShadowPass.setBindGroup(0, this.structuralShadowBindGroup);
-      structuralShadowPass.setVertexBuffer(0, this.vertexBuffer);
-      structuralShadowPass.draw(vertexCount);
-      structuralShadowPass.end();
+      const lightTransformUnchanged = this.structuralShadowLightTransform
+        && lightTransform.every((value, index) => value === this.structuralShadowLightTransform[index]);
+      if (this.structuralShadowTerrainRevision !== this.terrainRevision || !lightTransformUnchanged) {
+        const structuralShadowPass = encoder.beginRenderPass({
+          label: 'world-anchored structural shadow map pass',
+          colorAttachments: [],
+          depthStencilAttachment: {
+            view: this.structuralShadowTexture.createView(),
+            depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store',
+          },
+        });
+        structuralShadowPass.setPipeline(this.structuralShadowPipeline);
+        structuralShadowPass.setBindGroup(0, this.structuralShadowBindGroup);
+        structuralShadowPass.setVertexBuffer(0, this.vertexBuffer);
+        structuralShadowPass.draw(vertexCount);
+        structuralShadowPass.end();
+        this.structuralShadowTerrainRevision = this.terrainRevision;
+        this.structuralShadowLightTransform = lightTransform;
+      }
 
       const terrainPass = encoder.beginRenderPass({
         label: 'depth-tested projected terrain pass',
