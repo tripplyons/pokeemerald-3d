@@ -1720,12 +1720,12 @@ function automationHd2dCourses(radius = 12) {
       const i = py * worldWidth + px;
       const mapX = Math.floor((worldOriginX + px) / 16);
       const mapY = Math.floor((worldOriginY + py) / 16);
-      const metatileId = instance.exports.MapGridGetMetatileIdAt(mapX + 7, mapY + 7);
+      const metatileId = instance.exports.MapGridGetMetatileIdAt(mapX, mapY);
       row.push({
         mapX,
         mapY,
         metatileId,
-        collision: instance.exports.MapGridGetCollisionAt(mapX + 7, mapY + 7),
+        collision: instance.exports.MapGridGetCollisionAt(mapX, mapY),
         h: heights[i],
         g: grounds[i],
         geo: geometry[i],

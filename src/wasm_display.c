@@ -1398,7 +1398,7 @@ static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
           + HdMetatileCoverage(&sHdMapSamples[index], 1) != 0);
 }
 
-static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols)
+static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols)
 {
     if (index < sampleCols
      || index + sampleCols >= HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS)
@@ -1409,15 +1409,21 @@ static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols)
         && !sHdMapSamples[index + sampleCols].collision;
 }
 
+static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols)
+{
+    return HdMapSampleHasFacadeSupport(index, sampleCols)
+        && (sHdMapSamples[index].collision
+         || HdMapSampleHasTopArt(index)
+         || HdMapSampleIsDoorCourse(index)
+         || sHdMapSamples[index].hasWarpEntrance);
+}
+
 static bool8 HdMapSampleIsFacadeSpanCell(u32 index, u32 sampleCols)
 {
-    // A facade span is still authored wall/door material. Requiring only top
-    // art admitted flowerbeds and paved paths into a building shell whenever
-    // they touched a covered roof cell; those cells then inherited the shell's
-    // height and side closures. Keep the same support contract as the core so
-    // every claimed span cell has an opaque authored course above and a valid
-    // walkable course below.
-    return HdMapSampleIsSupportedWallCore(index, sampleCols);
+    // Facade spans may contain weak wall courses that lack collision or top
+    // coverage, but they still need the authored wall relationship above and a
+    // walkable course below so paths and flowerbeds do not grow shell sides.
+    return HdMapSampleHasFacadeSupport(index, sampleCols);
 }
 
 static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX, u32 sampleCols)
@@ -1426,7 +1432,7 @@ static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX, u32 sampleCo
     {
         const u32 index = row * sampleCols + x;
 
-        if (!HdMapSampleIsSupportedWallCore(index, sampleCols))
+        if (!HdMapSampleHasFacadeSupport(index, sampleCols))
             return FALSE;
     }
     return TRUE;
