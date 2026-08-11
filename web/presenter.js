@@ -1031,10 +1031,13 @@ class WebGpuPresenter {
             base: groundHeights[ty * cols + tx],
             roofHeight: -Infinity,
             roofCells: [],
+            wallCells: [],
+            wallRects: [],
             x0: Infinity,
             x1: -Infinity,
             minZ: Infinity,
             maxZ: -Infinity,
+            occlusionZ: -Infinity,
             frontZ: -Infinity,
           };
           components.set(id, component);
@@ -1083,7 +1086,10 @@ class WebGpuPresenter {
         const top = component.base + sourceHeight;
         const x0 = worldX(tx);
         const x1 = worldX(tx + width);
-        const z = worldZ(ty);
+        // The authored wall rectangle is vertical source art, so its physical
+        // south/front edge is after all of its 8px courses rather than at the
+        // rectangle's north edge.
+        const z = worldZ(ty + depth);
         quad(
           [x0, component.base, z, textureU(tx), textureV(ty + depth)],
           [x1, component.base, z, textureU(tx + width), textureV(ty + depth)],
@@ -1093,20 +1099,116 @@ class WebGpuPresenter {
         );
         component.x0 = Math.min(component.x0, x0);
         component.x1 = Math.max(component.x1, x1);
-        component.minZ = Math.min(component.minZ, z);
+        component.minZ = Math.min(component.minZ, worldZ(ty));
         component.maxZ = Math.max(component.maxZ, z);
+        component.occlusionZ = Math.max(component.occlusionZ, worldZ(ty));
         component.frontZ = Math.max(component.frontZ, z);
+        component.roofHeight = Math.max(component.roofHeight, top);
+        component.wallRects.push([tx, ty, width, depth, top]);
+        for (let y = 0; y < depth; y++) {
+          for (let x = 0; x < width; x++)
+            component.wallCells.push([tx + x, ty + y, top, ty - 1]);
+        }
       }
     }
     this.buildingComponents = Array.from(components.values()).filter((component) =>
       Number.isFinite(component.x0) && Number.isFinite(component.x1)
         && Number.isFinite(component.minZ) && Number.isFinite(component.frontZ));
 
-    // Close only exposed building perimeter. Side/rear UVs come from the local
-    // roof boundary course, not a facade column stretched through roof depth.
+    // Fill the footprint represented by vertical facade source courses with
+    // the adjacent roof boundary course. This extends the authored top mass to
+    // the relocated front without ever laying facade pixels horizontally.
     const sameRoof = (x, y, id) => inGrid(x, y)
       && surfaceAt(x, y) === SURFACE_ROOF && componentAt(x, y) === id;
     for (const component of components.values()) {
+      const localRoofSource = (tx, ty) => {
+        let sourceX = tx;
+        let sourceY = ty - 1;
+        if (!sameRoof(sourceX, sourceY, component.id)) {
+          let nearest = null;
+          let distance = Infinity;
+          for (const [roofX, roofY] of component.roofCells) {
+            const candidateDistance = Math.abs(roofX - tx) + Math.abs(roofY - ty);
+            if (candidateDistance < distance) {
+              nearest = [roofX, roofY];
+              distance = candidateDistance;
+            }
+          }
+          if (!nearest) return null;
+          [sourceX, sourceY] = nearest;
+        }
+        return [sourceX, sourceY];
+      };
+      for (const [tx, ty, width, depth, top] of component.wallRects) {
+        // Stretch each adjacent boundary course once through the complete
+        // authored facade depth. Repeating it per wall course would invent
+        // roof bands, while sampling the wall rectangle would lay facade art
+        // horizontally.
+        for (let x = 0; x < width; x++) {
+          const source = localRoofSource(tx + x, ty);
+          if (!source) continue;
+          const [sourceX, sourceY] = source;
+          quad(
+            [worldX(tx + x),top,worldZ(ty),textureU(sourceX),textureV(sourceY)],
+            [worldX(tx + x + 1),top,worldZ(ty),textureU(sourceX + 1),textureV(sourceY)],
+            [worldX(tx + x + 1),top,worldZ(ty + depth),textureU(sourceX + 1),textureV(sourceY + 1)],
+            [worldX(tx + x),top,worldZ(ty + depth),textureU(sourceX),textureV(sourceY + 1)],
+            [0, 1, 0], SURFACE_ROOF, 1, component.base,
+          );
+        }
+      }
+
+      for (const [tx, ty, top] of component.wallCells) {
+        const source = localRoofSource(tx, ty);
+        if (!source) continue;
+        const [sourceX, sourceY] = source;
+
+        // Continue exposed side/rear closure through the new top footprint.
+        // Its UVs use the same local roof boundary material; the exposed south
+        // edge is the facade itself and must not receive a second skin.
+        for (const dx of [-1, 1]) {
+          const neighborIsShell = sameRoof(tx + dx, ty, component.id)
+            || (inGrid(tx + dx, ty) && surfaceAt(tx + dx, ty) === SURFACE_WALL
+              && componentAt(tx + dx, ty) === component.id);
+          if (neighborIsShell) continue;
+          const bottom = Math.max(component.base, heightAt(tx + dx, ty));
+          if (bottom >= top) continue;
+          const x = worldX(tx + (dx > 0 ? 1 : 0));
+          const u = pixelU(originX + sourceX * TILE_SIZE + (dx > 0 ? TILE_SIZE - 1 : 0));
+          if (dx < 0) {
+            quad([x,bottom,worldZ(ty),u,textureV(sourceY)],
+                 [x,bottom,worldZ(ty + 1),u,textureV(sourceY + 1)],
+                 [x,top,worldZ(ty + 1),u,textureV(sourceY + 1)],
+                 [x,top,worldZ(ty),u,textureV(sourceY)],
+                 [-1, 0, 0], SURFACE_WALL, 1, component.base);
+          } else {
+            quad([x,bottom,worldZ(ty + 1),u,textureV(sourceY + 1)],
+                 [x,bottom,worldZ(ty),u,textureV(sourceY)],
+                 [x,top,worldZ(ty),u,textureV(sourceY)],
+                 [x,top,worldZ(ty + 1),u,textureV(sourceY + 1)],
+                 [1, 0, 0], SURFACE_WALL, 1, component.base);
+          }
+        }
+        const northIsShell = sameRoof(tx, ty - 1, component.id)
+          || (inGrid(tx, ty - 1) && surfaceAt(tx, ty - 1) === SURFACE_WALL
+            && componentAt(tx, ty - 1) === component.id);
+        if (!northIsShell) {
+          const bottom = Math.max(component.base, heightAt(tx, ty - 1));
+          if (bottom < top) {
+            const z = worldZ(ty);
+            const v = pixelV(originY + sourceY * TILE_SIZE);
+            quad([worldX(tx + 1),bottom,z,textureU(sourceX + 1),v],
+                 [worldX(tx),bottom,z,textureU(sourceX),v],
+                 [worldX(tx),top,z,textureU(sourceX),v],
+                 [worldX(tx + 1),top,z,textureU(sourceX + 1),v],
+                 [0, 0, -1], SURFACE_WALL, 1, component.base);
+          }
+        }
+      }
+
+      // Close only exposed building perimeter. Side/rear UVs come from the
+      // local roof boundary course, not a facade column stretched through roof
+      // depth. Wall top cells above make the former roof/facade seam internal.
       for (const [tx, ty] of component.roofCells) {
         const height = heightAt(tx, ty);
         for (const dx of [-1, 1]) {
@@ -1255,13 +1357,53 @@ class WebGpuPresenter {
     };
   }
 
-  actorOccludedByShell(actorX0, actorX1, footZ) {
-    // Resolve the whole owning actor from its grouped foot and horizontal span.
-    // A building shell never gets to reject only part of one actor's cards.
+  shellProjection(x, y, z, base, tilt, zoom) {
+    const angle = CAMERA_TILT_DEGREES * tilt * Math.PI / 180;
+    const sine = Math.sin(angle);
+    const cosine = Math.cos(angle);
+    const zoomOut = 0.30 * zoom + 0.76923077 * zoom * zoom * (zoom - 0.35);
+    const focal = CAMERA_HEIGHT / (1 + zoomOut);
+    const viewY = base * sine - z * cosine + y - base;
+    const cameraDepth = CAMERA_HEIGHT - base * cosine - z * sine;
+    return {
+      x: this.width / 2 + x * focal / cameraDepth,
+      y: this.height / 2 - viewY * focal / cameraDepth,
+      cameraDepth,
+    };
+  }
+
+  actorOccludedByShell(actor, tilt, zoom) {
+    // Route the complete owning actor only when its grouped projected cards
+    // actually cover a shell. World X/Z alone made separated cards become
+    // false whole-body silhouettes near a building's footprint.
     for (const component of this.buildingComponents) {
-      const overlapsX = actorX1 > component.x0 && actorX0 < component.x1;
-      const behindFacade = footZ < component.frontZ - 0.5;
-      if (!overlapsX || !behindFacade) continue;
+      const overlapsWorldX = actor.worldX1 > component.x0 && actor.worldX0 < component.x1;
+      // The facade's source footprint remains its doorway/front transition
+      // zone even though the physical plane is now at its south boundary.
+      // Only actors north of that footprint are genuinely under/behind roof.
+      const behindRoof = actor.footZ < component.occlusionZ - 0.5;
+      if (!overlapsWorldX || !behindRoof) continue;
+
+      const bounds = {
+        x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity,
+        nearDepth: Infinity,
+      };
+      for (const x of [component.x0, component.x1]) {
+        for (const y of [component.base, component.roofHeight]) {
+          for (const z of [component.minZ, component.frontZ]) {
+            const point = this.shellProjection(x, y, z, component.base, tilt, zoom);
+            bounds.x0 = Math.min(bounds.x0, point.x);
+            bounds.x1 = Math.max(bounds.x1, point.x);
+            bounds.y0 = Math.min(bounds.y0, point.y);
+            bounds.y1 = Math.max(bounds.y1, point.y);
+            bounds.nearDepth = Math.min(bounds.nearDepth, point.cameraDepth);
+          }
+        }
+      }
+      const overlapsProjection = actor.screenX1 > bounds.x0 && actor.screenX0 < bounds.x1
+        && actor.screenY1 > bounds.y0 && actor.screenY0 < bounds.y1;
+      const shellIsInFront = actor.cameraDepth > bounds.nearDepth + 0.5;
+      if (!overlapsProjection || !shellIsInFront) continue;
       return true;
     }
     return false;
@@ -1424,9 +1566,18 @@ class WebGpuPresenter {
     const groupAnchorY = new Int32Array(objectEventSpriteFlags.length);
     const groupX0 = new Float32Array(objectEventSpriteFlags.length);
     const groupX1 = new Float32Array(objectEventSpriteFlags.length);
+    const groupScreenX0 = new Float32Array(objectEventSpriteFlags.length);
+    const groupScreenX1 = new Float32Array(objectEventSpriteFlags.length);
+    const groupScreenY0 = new Float32Array(objectEventSpriteFlags.length);
+    const groupScreenY1 = new Float32Array(objectEventSpriteFlags.length);
+    const groupCameraDepth = new Float32Array(objectEventSpriteFlags.length);
     groupAnchorY.fill(-32768);
     groupX0.fill(Infinity);
     groupX1.fill(-Infinity);
+    groupScreenX0.fill(Infinity);
+    groupScreenX1.fill(-Infinity);
+    groupScreenY0.fill(Infinity);
+    groupScreenY1.fill(-Infinity);
     for (let index = 0; index < objectSourceCount; index++) {
       const o = index * 16;
       const spriteId = objectDescriptors[o + 10];
@@ -1437,11 +1588,44 @@ class WebGpuPresenter {
         groupX1[spriteId], objectDescriptors[o + 1] + objectDescriptors[o + 7] - this.width / 2,
       );
     }
+    // Project every card with its owning group's shared foot so the occlusion
+    // decision uses the same complete billboard bounds that will be emitted.
+    for (let index = 0; index < objectSourceCount; index++) {
+      const o = index * 16;
+      const spriteId = objectDescriptors[o + 10];
+      if (spriteId < 0 || spriteId >= groupAnchorY.length || !objectEventSpriteFlags[spriteId]
+          || groupAnchorY[spriteId] <= -32768) continue;
+      const anchorX = objectDescriptors[o + 3];
+      const anchorY = groupAnchorY[spriteId];
+      const groundX = anchorX - this.width / 2;
+      const groundZ = anchorY - this.height / 2;
+      const projected = this.cameraProjection(
+        groundX, this.terrainGroundHeightAt(groundX, groundZ), groundZ, tilt, zoom,
+      );
+      const x0 = projected.x + (objectDescriptors[o + 1] - anchorX) * projected.scale;
+      const y0 = projected.y + (objectDescriptors[o + 2] - anchorY) * projected.scale;
+      groupScreenX0[spriteId] = Math.min(groupScreenX0[spriteId], x0);
+      groupScreenX1[spriteId] = Math.max(
+        groupScreenX1[spriteId], x0 + objectDescriptors[o + 7] * projected.scale,
+      );
+      groupScreenY0[spriteId] = Math.min(groupScreenY0[spriteId], y0);
+      groupScreenY1[spriteId] = Math.max(
+        groupScreenY1[spriteId], y0 + objectDescriptors[o + 8] * projected.scale,
+      );
+      groupCameraDepth[spriteId] = Math.max(groupCameraDepth[spriteId], projected.cameraDepth);
+    }
     const shellOccludedGroups = new Uint8Array(objectEventSpriteFlags.length);
     for (let spriteId = 0; spriteId < shellOccludedGroups.length; spriteId++) {
       if (!objectEventSpriteFlags[spriteId] || groupAnchorY[spriteId] <= -32768) continue;
       shellOccludedGroups[spriteId] = this.actorOccludedByShell(
-        groupX0[spriteId], groupX1[spriteId], groupAnchorY[spriteId] - this.height / 2,
+        {
+          worldX0: groupX0[spriteId], worldX1: groupX1[spriteId],
+          footZ: groupAnchorY[spriteId] - this.height / 2,
+          screenX0: groupScreenX0[spriteId], screenX1: groupScreenX1[spriteId],
+          screenY0: groupScreenY0[spriteId], screenY1: groupScreenY1[spriteId],
+          cameraDepth: groupCameraDepth[spriteId],
+        },
+        tilt, zoom,
       );
     }
 
