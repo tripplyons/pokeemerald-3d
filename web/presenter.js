@@ -132,6 +132,7 @@ struct VertexInput {
   @location(0) position: vec3f,
   @location(1) uv: vec2f,
   @location(2) shade: f32,
+  @location(3) shell: vec2f,
 }
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -152,8 +153,14 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
   let zoom = camera.values.y;
   let zoomOut = 0.30 * zoom + 0.76923077 * zoom * zoom * (zoom - 0.35);
   let focal = cameraHeight / (1.0 + zoomOut);
-  let viewY = input.position.y * sine - input.position.z * cosine;
-  let depth = cameraHeight - input.position.y * cosine - input.position.z * sine;
+  let shellBase = input.shell.y;
+  let ordinaryViewY = input.position.y * sine - input.position.z * cosine;
+  let shellViewY = shellBase * sine - input.position.z * cosine
+    + input.position.y - shellBase;
+  let viewY = select(ordinaryViewY, shellViewY, input.shell.x > 0.5);
+  let ordinaryDepth = cameraHeight - input.position.y * cosine - input.position.z * sine;
+  let shellDepth = cameraHeight - shellBase * cosine - input.position.z * sine;
+  let depth = select(ordinaryDepth, shellDepth, input.shell.x > 0.5);
   let near = camera.viewport.z;
   let far = camera.viewport.w;
   var output: VertexOutput;
@@ -325,7 +332,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   } else {
     output.color = color;
   }
-  output.depth = select(input.position.z, 0.0, inAtlas);
+  output.depth = input.position.z;
   return output;
 }
 `;
@@ -480,7 +487,7 @@ const CAMERA_HEIGHT = 480;
 const CAMERA_TILT_DEGREES = 45.384615;
 const CAMERA_NEAR = 32;
 const CAMERA_FAR = 1024;
-const VERTEX_FLOATS = 6;
+const VERTEX_FLOATS = 8;
 const BILLBOARD_VERTEX_FLOATS = 19;
 const CAST_SHADOW_VERTEX_FLOATS = 16;
 
@@ -532,7 +539,11 @@ class WebGpuPresenter {
     this.castShadowVertexBuffer = device.createBuffer({ label: 'projected sprite shadow geometry', size: this.castShadowVertexCapacity, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     this.uiPixels = new Uint8Array(width * height * 4);
     this.objectPixels = Array.from({ length: 128 }, () => []);
-    this.tileHeights = new Float32Array((Math.ceil(worldWidth / TILE_SIZE) + 2) * (Math.ceil(worldHeight / TILE_SIZE) + 2));
+    const terrainTileCapacity = (Math.ceil(worldWidth / TILE_SIZE) + 2) * (Math.ceil(worldHeight / TILE_SIZE) + 2);
+    this.tileHeights = new Float32Array(terrainTileCapacity);
+    this.tileGroundHeights = new Float32Array(terrainTileCapacity);
+    this.tileGeometry = new Uint16Array(terrainTileCapacity);
+    this.buildingComponents = [];
     this.terrainCols = 0;
     this.terrainRows = 0;
     this.terrainOriginX = 0;
@@ -557,6 +568,7 @@ class WebGpuPresenter {
           { shaderLocation: 0, offset: 0, format: 'float32x3' },
           { shaderLocation: 1, offset: 12, format: 'float32x2' },
           { shaderLocation: 2, offset: 20, format: 'float32' },
+          { shaderLocation: 3, offset: 24, format: 'float32x2' },
         ] }],
       },
       fragment: { module: terrainModule, entryPoint: 'fragmentMain', targets: [{ format: 'rgba8unorm' }] },
@@ -725,17 +737,7 @@ class WebGpuPresenter {
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
   }
 
-  tileHeight(worldHeights, pixelX, pixelY) {
-    let height = 0;
-    for (let y = Math.max(0, pixelY); y < Math.min(this.worldHeight, pixelY + TILE_SIZE); y++) {
-      const row = y * this.worldWidth;
-      for (let x = Math.max(0, pixelX); x < Math.min(this.worldWidth, pixelX + TILE_SIZE); x++)
-        height = Math.max(height, worldHeights[row + x]);
-    }
-    return height;
-  }
-
-  buildTerrain(worldHeights, gridOffsetX, gridOffsetY) {
+  buildTerrain(worldHeights, worldGroundHeights, worldGeometry, gridOffsetX, gridOffsetY) {
     const originX = gridOffsetX - TILE_SIZE;
     const originY = gridOffsetY - TILE_SIZE;
     const cols = Math.ceil((this.worldWidth - originX) / TILE_SIZE);
@@ -745,43 +747,288 @@ class WebGpuPresenter {
     this.terrainOriginX = originX;
     this.terrainOriginY = originY;
     const heights = this.tileHeights;
-    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) heights[y * cols + x] = this.tileHeight(worldHeights, originX + x * TILE_SIZE, originY + y * TILE_SIZE);
+    const groundHeights = this.tileGroundHeights;
+    const geometry = this.tileGeometry;
+    for (let ty = 0; ty < rows; ty++) {
+      for (let tx = 0; tx < cols; tx++) {
+        const pixelX = Math.max(0, Math.min(this.worldWidth - 1, originX + tx * TILE_SIZE + TILE_SIZE / 2));
+        const pixelY = Math.max(0, Math.min(this.worldHeight - 1, originY + ty * TILE_SIZE + TILE_SIZE / 2));
+        const source = Math.floor(pixelY) * this.worldWidth + Math.floor(pixelX);
+        const tile = ty * cols + tx;
+        heights[tile] = worldHeights[source];
+        groundHeights[tile] = worldGroundHeights[source];
+        geometry[tile] = worldGeometry[source];
+      }
+    }
+
     const vertices = [];
-    const pushVertex = (x, y, z, u, v, shade) => vertices.push(x, y, z, u, v, shade);
-    const quad = (a, b, c, d, shade) => {
-      for (const p of [a, b, c, a, c, d]) pushVertex(p[0], p[1], p[2], p[3], p[4], shade);
+    const pushVertex = (x, y, z, u, v, shade, shell, base) =>
+      vertices.push(x, y, z, u, v, shade, shell, base);
+    const quad = (a, b, c, d, shade, shell = 0, base = 0) => {
+      for (const point of [a, b, c, a, c, d])
+        pushVertex(point[0], point[1], point[2], point[3], point[4], shade, shell, base);
     };
     const halfW = this.worldWidth / 2;
     const halfH = this.worldHeight / 2;
-    const heightAt = (x, y) => x < 0 || y < 0 || x >= cols || y >= rows ? 0 : heights[y * cols + x];
+    const inGrid = (x, y) => x >= 0 && y >= 0 && x < cols && y < rows;
+    const heightAt = (x, y) => inGrid(x, y) ? heights[y * cols + x] : 0;
+    const geometryAt = (x, y) => inGrid(x, y) ? geometry[y * cols + x] : 0;
+    const surfaceAt = (x, y) => geometryAt(x, y) & 7;
+    const componentAt = (x, y) => geometryAt(x, y) >> 3;
+    const worldX = (x) => originX + x * TILE_SIZE - halfW;
+    const worldZ = (y) => originY + y * TILE_SIZE - halfH;
+    const textureU = (x) => Math.max(0, Math.min(this.worldWidth, originX + x * TILE_SIZE)) / this.worldWidth;
+    const textureV = (y) => Math.max(0, Math.min(this.worldHeight, originY + y * TILE_SIZE)) / this.worldHeight;
+    const pixelU = (pixel) => (Math.max(0, Math.min(this.worldWidth - 1, pixel)) + 0.5) / this.worldWidth;
+    const pixelV = (pixel) => (Math.max(0, Math.min(this.worldHeight - 1, pixel)) + 0.5) / this.worldHeight;
+    const SURFACE_WALL = 5;
+    const SURFACE_ROOF = 6;
+
+    // Merge source-aligned horizontal courses. Roofs merge only when C says
+    // they have the same frame-local owner; facade source is never a floor.
+    const visited = new Uint8Array(cols * rows);
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
-        const h = heightAt(tx, ty);
-        const pixelX0 = originX + tx * TILE_SIZE;
-        const pixelY0 = originY + ty * TILE_SIZE;
-        const x0 = pixelX0 - halfW;
-        const x1 = x0 + TILE_SIZE;
-        const z0 = pixelY0 - halfH;
-        const z1 = z0 + TILE_SIZE;
-        const u0 = Math.max(0, pixelX0) / this.worldWidth;
-        const u1 = Math.min(this.worldWidth, pixelX0 + TILE_SIZE) / this.worldWidth;
-        const v0 = Math.max(0, pixelY0) / this.worldHeight;
-        const v1 = Math.min(this.worldHeight, pixelY0 + TILE_SIZE) / this.worldHeight;
-        const uWest = (Math.max(0, pixelX0) + 0.5) / this.worldWidth;
-        const uEast = (Math.min(this.worldWidth, pixelX0 + TILE_SIZE) - 0.5) / this.worldWidth;
-        const vNorth = (Math.max(0, pixelY0) + 0.5) / this.worldHeight;
-        const vSouth = (Math.min(this.worldHeight, pixelY0 + TILE_SIZE) - 0.5) / this.worldHeight;
-        quad([x0,h,z0,u0,v0],[x1,h,z0,u1,v0],[x1,h,z1,u1,v1],[x0,h,z1,u0,v1],1.0);
-        const north = heightAt(tx, ty - 1);
-        const south = heightAt(tx, ty + 1);
-        const west = heightAt(tx - 1, ty);
-        const east = heightAt(tx + 1, ty);
-        if (north < h) quad([x1,north,z0,u1,vNorth],[x0,north,z0,u0,vNorth],[x0,h,z0,u0,vNorth],[x1,h,z0,u1,vNorth],0.68);
-        if (south < h) quad([x0,south,z1,u0,vSouth],[x1,south,z1,u1,vSouth],[x1,h,z1,u1,vSouth],[x0,h,z1,u0,vSouth],0.88);
-        if (west < h) quad([x0,west,z0,uWest,v0],[x0,west,z1,uWest,v1],[x0,h,z1,uWest,v1],[x0,h,z0,uWest,v0],0.64);
-        if (east < h) quad([x1,east,z1,uEast,v1],[x1,east,z0,uEast,v0],[x1,h,z0,uEast,v0],[x1,h,z1,uEast,v1],0.82);
+        const start = ty * cols + tx;
+        if (visited[start]) continue;
+        visited[start] = 1;
+        if (surfaceAt(tx, ty) === SURFACE_WALL) {
+          let sourceY = ty + 1;
+          while (sourceY < rows && surfaceAt(tx, sourceY) === SURFACE_WALL
+              && componentAt(tx, sourceY) === componentAt(tx, ty)) sourceY++;
+          sourceY = Math.min(rows - 1, sourceY);
+          const ground = groundHeights[start];
+          // Replace the removed wall footprint with the first authored ground
+          // course in front. No WALL source texel is ever laid horizontally.
+          quad(
+            [worldX(tx),ground,worldZ(ty),textureU(tx),textureV(sourceY)],
+            [worldX(tx + 1),ground,worldZ(ty),textureU(tx + 1),textureV(sourceY)],
+            [worldX(tx + 1),ground,worldZ(ty + 1),textureU(tx + 1),textureV(sourceY + 1)],
+            [worldX(tx),ground,worldZ(ty + 1),textureU(tx),textureV(sourceY + 1)],
+            1.0,
+          );
+          continue;
+        }
+
+        const word = geometry[start];
+        const height = heights[start];
+        let width = 1;
+        while (tx + width < cols) {
+          const tile = ty * cols + tx + width;
+          if (visited[tile] || geometry[tile] !== word || heights[tile] !== height) break;
+          width++;
+        }
+        let depth = 1;
+        depthLoop: while (ty + depth < rows) {
+          for (let x = 0; x < width; x++) {
+            const tile = (ty + depth) * cols + tx + x;
+            if (visited[tile] || geometry[tile] !== word || heights[tile] !== height)
+              break depthLoop;
+          }
+          depth++;
+        }
+        for (let y = 0; y < depth; y++) {
+          for (let x = 0; x < width; x++)
+            visited[(ty + y) * cols + tx + x] = 1;
+        }
+        const shell = surfaceAt(tx, ty) === SURFACE_ROOF && componentAt(tx, ty) !== 0;
+        quad(
+          [worldX(tx), height, worldZ(ty), textureU(tx), textureV(ty)],
+          [worldX(tx + width), height, worldZ(ty), textureU(tx + width), textureV(ty)],
+          [worldX(tx + width), height, worldZ(ty + depth), textureU(tx + width), textureV(ty + depth)],
+          [worldX(tx), height, worldZ(ty + depth), textureU(tx), textureV(ty + depth)],
+          1.0, shell ? 1 : 0, shell ? groundHeights[start] : 0,
+        );
       }
     }
+
+    // Component membership is decoded, never inferred. Every maximal wall
+    // rectangle retains its complete authored X/Y range and maps one source
+    // texel to one world unit on the south-facing plane.
+    const components = new Map();
+    for (let ty = 0; ty < rows; ty++) {
+      for (let tx = 0; tx < cols; tx++) {
+        const id = componentAt(tx, ty);
+        if (!id) continue;
+        let component = components.get(id);
+        if (!component) {
+          component = {
+            id,
+            base: groundHeights[ty * cols + tx],
+            roofHeight: -Infinity,
+            roofCells: [],
+            x0: Infinity,
+            x1: -Infinity,
+            minZ: Infinity,
+            maxZ: -Infinity,
+            frontZ: -Infinity,
+          };
+          components.set(id, component);
+        }
+        component.base = Math.min(component.base, groundHeights[ty * cols + tx]);
+        if (surfaceAt(tx, ty) === SURFACE_ROOF) {
+          component.roofHeight = Math.max(component.roofHeight, heightAt(tx, ty));
+          component.roofCells.push([tx, ty]);
+          component.x0 = Math.min(component.x0, worldX(tx));
+          component.x1 = Math.max(component.x1, worldX(tx + 1));
+          component.minZ = Math.min(component.minZ, worldZ(ty));
+          component.maxZ = Math.max(component.maxZ, worldZ(ty + 1));
+        }
+      }
+    }
+
+    const facadeVisited = new Uint8Array(cols * rows);
+    for (let ty = 0; ty < rows; ty++) {
+      for (let tx = 0; tx < cols; tx++) {
+        const start = ty * cols + tx;
+        const id = componentAt(tx, ty);
+        if (!id || surfaceAt(tx, ty) !== SURFACE_WALL || facadeVisited[start]) continue;
+        let width = 1;
+        while (tx + width < cols) {
+          const tile = ty * cols + tx + width;
+          if (facadeVisited[tile] || componentAt(tx + width, ty) !== id
+              || surfaceAt(tx + width, ty) !== SURFACE_WALL) break;
+          width++;
+        }
+        let depth = 1;
+        depthLoop: while (ty + depth < rows) {
+          for (let x = 0; x < width; x++) {
+            const tile = (ty + depth) * cols + tx + x;
+            if (facadeVisited[tile] || componentAt(tx + x, ty + depth) !== id
+                || surfaceAt(tx + x, ty + depth) !== SURFACE_WALL) break depthLoop;
+          }
+          depth++;
+        }
+        for (let y = 0; y < depth; y++) {
+          for (let x = 0; x < width; x++)
+            facadeVisited[(ty + y) * cols + tx + x] = 1;
+        }
+
+        const component = components.get(id);
+        const sourceHeight = depth * TILE_SIZE;
+        const top = component.base + sourceHeight;
+        const x0 = worldX(tx);
+        const x1 = worldX(tx + width);
+        const z = worldZ(ty);
+        quad(
+          [x0, component.base, z, textureU(tx), textureV(ty + depth)],
+          [x1, component.base, z, textureU(tx + width), textureV(ty + depth)],
+          [x1, top, z, textureU(tx + width), textureV(ty)],
+          [x0, top, z, textureU(tx), textureV(ty)],
+          0.88, 1, component.base,
+        );
+        component.x0 = Math.min(component.x0, x0);
+        component.x1 = Math.max(component.x1, x1);
+        component.minZ = Math.min(component.minZ, z);
+        component.maxZ = Math.max(component.maxZ, z);
+        component.frontZ = Math.max(component.frontZ, z);
+      }
+    }
+    this.buildingComponents = Array.from(components.values()).filter((component) =>
+      Number.isFinite(component.x0) && Number.isFinite(component.x1)
+        && Number.isFinite(component.minZ) && Number.isFinite(component.frontZ));
+
+    // Close only exposed building perimeter. Side/rear UVs come from the local
+    // roof boundary course, not a facade column stretched through roof depth.
+    const sameRoof = (x, y, id) => inGrid(x, y)
+      && surfaceAt(x, y) === SURFACE_ROOF && componentAt(x, y) === id;
+    for (const component of components.values()) {
+      for (const [tx, ty] of component.roofCells) {
+        const height = heightAt(tx, ty);
+        for (const [dx, shade] of [[-1, 0.64], [1, 0.82]]) {
+          if (sameRoof(tx + dx, ty, component.id)) continue;
+          const bottom = Math.max(component.base, heightAt(tx + dx, ty));
+          if (bottom >= height) continue;
+          const x = worldX(tx + (dx > 0 ? 1 : 0));
+          const u = pixelU(originX + tx * TILE_SIZE + (dx > 0 ? TILE_SIZE - 1 : 0));
+          const v0 = textureV(ty);
+          const v1 = textureV(ty + 1);
+          if (dx < 0) {
+            quad([x,bottom,worldZ(ty),u,v0], [x,bottom,worldZ(ty + 1),u,v1],
+                 [x,height,worldZ(ty + 1),u,v1], [x,height,worldZ(ty),u,v0],
+                 shade, 1, component.base);
+          } else {
+            quad([x,bottom,worldZ(ty + 1),u,v1], [x,bottom,worldZ(ty),u,v0],
+                 [x,height,worldZ(ty),u,v0], [x,height,worldZ(ty + 1),u,v1],
+                 shade, 1, component.base);
+          }
+        }
+        for (const [dy, shade] of [[-1, 0.68], [1, 0.88]]) {
+          if (sameRoof(tx, ty + dy, component.id)) continue;
+          if (dy > 0 && componentAt(tx, ty + 1) === component.id
+              && surfaceAt(tx, ty + 1) === SURFACE_WALL) continue;
+          const bottom = Math.max(component.base, heightAt(tx, ty + dy));
+          if (bottom >= height) continue;
+          const z = worldZ(ty + (dy > 0 ? 1 : 0));
+          const v = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));
+          if (dy < 0) {
+            quad([worldX(tx + 1),bottom,z,textureU(tx + 1),v],
+                 [worldX(tx),bottom,z,textureU(tx),v],
+                 [worldX(tx),height,z,textureU(tx),v],
+                 [worldX(tx + 1),height,z,textureU(tx + 1),v],
+                 shade, 1, component.base);
+          } else {
+            quad([worldX(tx),bottom,z,textureU(tx),v],
+                 [worldX(tx + 1),bottom,z,textureU(tx + 1),v],
+                 [worldX(tx + 1),height,z,textureU(tx + 1),v],
+                 [worldX(tx),height,z,textureU(tx),v],
+                 shade, 1, component.base);
+          }
+        }
+      }
+    }
+
+    // Preserve the existing atlas-edge extrusion for non-building materials.
+    const ordinaryEdge = (tx, ty, dx, dy) => {
+      const surface = surfaceAt(tx, ty);
+      const height = heightAt(tx, ty);
+      const bottom = heightAt(tx + dx, ty + dy);
+      return surface !== SURFACE_ROOF && surface !== SURFACE_WALL && bottom < height
+        ? { height, bottom } : null;
+    };
+    for (const [dy, shade] of [[-1, 0.68], [1, 0.88]]) {
+      for (let ty = 0; ty < rows; ty++) {
+        for (let tx = 0; tx < cols; tx++) {
+          const edge = ordinaryEdge(tx, ty, 0, dy);
+          if (!edge) continue;
+          const z = worldZ(ty + (dy > 0 ? 1 : 0));
+          const v = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));
+          if (dy < 0) {
+            quad([worldX(tx + 1),edge.bottom,z,textureU(tx + 1),v],
+                 [worldX(tx),edge.bottom,z,textureU(tx),v],
+                 [worldX(tx),edge.height,z,textureU(tx),v],
+                 [worldX(tx + 1),edge.height,z,textureU(tx + 1),v], shade);
+          } else {
+            quad([worldX(tx),edge.bottom,z,textureU(tx),v],
+                 [worldX(tx + 1),edge.bottom,z,textureU(tx + 1),v],
+                 [worldX(tx + 1),edge.height,z,textureU(tx + 1),v],
+                 [worldX(tx),edge.height,z,textureU(tx),v], shade);
+          }
+        }
+      }
+    }
+    for (const [dx, shade] of [[-1, 0.64], [1, 0.82]]) {
+      for (let tx = 0; tx < cols; tx++) {
+        for (let ty = 0; ty < rows; ty++) {
+          const edge = ordinaryEdge(tx, ty, dx, 0);
+          if (!edge) continue;
+          const x = worldX(tx + (dx > 0 ? 1 : 0));
+          const u = pixelU(originX + tx * TILE_SIZE + (dx > 0 ? TILE_SIZE - 1 : 0));
+          if (dx < 0) {
+            quad([x,edge.bottom,worldZ(ty),u,textureV(ty)],
+                 [x,edge.bottom,worldZ(ty + 1),u,textureV(ty + 1)],
+                 [x,edge.height,worldZ(ty + 1),u,textureV(ty + 1)],
+                 [x,edge.height,worldZ(ty),u,textureV(ty)], shade);
+          } else {
+            quad([x,edge.bottom,worldZ(ty + 1),u,textureV(ty + 1)],
+                 [x,edge.bottom,worldZ(ty),u,textureV(ty)],
+                 [x,edge.height,worldZ(ty),u,textureV(ty)],
+                 [x,edge.height,worldZ(ty + 1),u,textureV(ty + 1)], shade);
+          }
+        }
+      }
+    }
+
     const data = new Float32Array(vertices);
     if (data.byteLength > this.vertexCapacity) {
       this.vertexBuffer.destroy();
@@ -801,6 +1048,15 @@ class WebGpuPresenter {
     return this.tileHeights[tileZ * this.terrainCols + tileX];
   }
 
+  terrainGroundHeightAt(x, z) {
+    const atlasX = x + this.worldWidth / 2;
+    const atlasZ = z + this.worldHeight / 2;
+    const tileX = Math.floor((atlasX - this.terrainOriginX) / TILE_SIZE);
+    const tileZ = Math.floor((atlasZ - this.terrainOriginY) / TILE_SIZE);
+    if (tileX < 0 || tileZ < 0 || tileX >= this.terrainCols || tileZ >= this.terrainRows) return 0;
+    return this.tileGroundHeights[tileZ * this.terrainCols + tileX];
+  }
+
   cameraProjection(x, y, z, tilt, zoom) {
     const angle = CAMERA_TILT_DEGREES * tilt * Math.PI / 180;
     const sine = Math.sin(angle);
@@ -817,6 +1073,22 @@ class WebGpuPresenter {
     };
   }
 
+  actorDepthAt(actorX0, actorX1, footZ, tilt, zoom) {
+    // Resolve each actor against complete authored building shells from its
+    // foot. Every card in the actor then receives one depth, independent of
+    // perspective, so roofs and facades cannot slice or reorder the actor.
+    let depth = 0;
+    for (const component of this.buildingComponents) {
+      const overlapsX = actorX1 > component.x0 && actorX0 < component.x1;
+      const behindFacade = footZ < component.frontZ - 0.5;
+      if (!overlapsX || !behindFacade) continue;
+      const componentDepth = this.cameraProjection(
+        0, component.base, component.minZ, tilt, zoom,
+      ).depth + 0.00002;
+      depth = Math.max(depth, componentDepth);
+    }
+    return depth;
+  }
 
   measureObjectFootRows(objectDescriptors, objectSourceCount, objectEventSpriteFlags,
                         objectSourcePixels) {
@@ -900,7 +1172,7 @@ class WebGpuPresenter {
         const height = Math.max(0, group.anchorY - (screenY + v) - 1);
         const x = group.anchorX - this.width / 2 + (screenX - group.anchorX + u) - height * 0.16;
         const z = group.anchorY - this.height / 2 - height * 1.65;
-        return { x, y: this.terrainHeightAt(x, z), z };
+        return { x, y: this.terrainGroundHeightAt(x, z), z };
       };
       // Leave a three-source-pixel apron around every projected component so
       // the wide alpha penumbra can cross tile and subsprite boundaries instead
@@ -931,7 +1203,7 @@ class WebGpuPresenter {
   }
 
   buildFrameLayers(finalPixels, layerPixels, objectIds, objectPixels, objectPriorities,
-                   objectDescriptors, objectSourceCount, tilt, zoom) {
+                   objectDescriptors, objectEventSpriteFlags, objectSourceCount, tilt, zoom) {
     this.uiPixels.fill(0);
     for (const pixels of this.objectPixels) pixels.length = 0;
     for (let index = 0; index < layerPixels.length; index++) {
@@ -970,13 +1242,21 @@ class WebGpuPresenter {
     // The engine exports the owning Sprite slot for each OAM entry. All
     // subsprites from one engine sprite share a foot-row projection without
     // accidentally joining touching actors or weather tiles.
-    const groupAnchorY = new Int32Array(64);
+    const groupAnchorY = new Int32Array(objectEventSpriteFlags.length);
+    const groupX0 = new Float32Array(objectEventSpriteFlags.length);
+    const groupX1 = new Float32Array(objectEventSpriteFlags.length);
     groupAnchorY.fill(-32768);
+    groupX0.fill(Infinity);
+    groupX1.fill(-Infinity);
     for (let index = 0; index < objectSourceCount; index++) {
       const o = index * 16;
       const spriteId = objectDescriptors[o + 10];
-      if (spriteId < groupAnchorY.length)
-        groupAnchorY[spriteId] = Math.max(groupAnchorY[spriteId], objectDescriptors[o + 4]);
+      if (spriteId < 0 || spriteId >= groupAnchorY.length) continue;
+      groupAnchorY[spriteId] = Math.max(groupAnchorY[spriteId], objectDescriptors[o + 4]);
+      groupX0[spriteId] = Math.min(groupX0[spriteId], objectDescriptors[o + 1] - this.width / 2);
+      groupX1[spriteId] = Math.max(
+        groupX1[spriteId], objectDescriptors[o + 1] + objectDescriptors[o + 7] - this.width / 2,
+      );
     }
 
     const order = Array.from({ length: objectSourceCount }, (_, index) => index);
@@ -1008,14 +1288,22 @@ class WebGpuPresenter {
       const pc = objectDescriptors[o + 14], pd = objectDescriptors[o + 15];
       if (hasUiPlane && priority === 0 && objectTouchesUi(screenX, screenY, drawW, drawH)) continue;
 
-      const projected = this.cameraProjection(anchorX - this.width / 2, 0, anchorY - this.height / 2, tilt, zoom);
+      const groundX = anchorX - this.width / 2;
+      const groundZ = anchorY - this.height / 2;
+      const projected = this.cameraProjection(
+        groundX, this.terrainGroundHeightAt(groundX, groundZ), groundZ, tilt, zoom,
+      );
       const x0 = projected.x + (screenX - anchorX) * projected.scale;
       const x1 = x0 + drawW * projected.scale;
       const y0 = projected.y + (screenY - anchorY) * projected.scale;
       const y1 = y0 + drawH * projected.scale;
-      // Native BG priority supplies exact overhead masking. Keep the card in
-      // front of unrelated terrain fragments so its middle cannot be sliced away.
-      const depth = projected.depth;
+      // Only authored building components participate in 3D billboard depth.
+      // Native BG priority remains authoritative for unrelated overhead art.
+      const isActor = spriteId >= 0 && spriteId < objectEventSpriteFlags.length
+        && objectEventSpriteFlags[spriteId];
+      const depth = isActor
+        ? this.actorDepthAt(groupX0[spriteId], groupX1[spriteId], groundZ, tilt, zoom)
+        : 0;
       const extra = [depth, layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd,
                      screenX, screenY, oamId, priority];
       for (const point of [
@@ -1048,13 +1336,19 @@ class WebGpuPresenter {
     );
   }
 
-  present({ finalPixels, worldPixels, worldHeightPixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom }) {
+  present({ finalPixels, worldPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom }) {
     const encoder = this.device.createCommandEncoder({ label: 'pokeemerald frame encoder' });
     let presentBindGroup = this.finalBindGroup;
     if (enhanced) {
       this.writeTexture(this.worldTexture, worldPixels, this.worldWidth, this.worldHeight);
-      const vertexCount = this.buildTerrain(worldHeightPixels, worldGridOffsetX, worldGridOffsetY);
-      const billboardVertexCount = this.buildFrameLayers(finalPixels, layerPixels, objectIds, objectPixels, objectPriorities, objectDescriptors, objectSourceCount, perspective, zoom);
+      const vertexCount = this.buildTerrain(
+        worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels,
+        worldGridOffsetX, worldGridOffsetY,
+      );
+      const billboardVertexCount = this.buildFrameLayers(
+        finalPixels, layerPixels, objectIds, objectPixels, objectPriorities,
+        objectDescriptors, objectEventSpriteFlags, objectSourceCount, perspective, zoom,
+      );
       const objectFootRows = this.measureObjectFootRows(objectDescriptors, objectSourceCount, objectEventSpriteFlags, objectSourcePixels);
       const castShadowVertexCount = this.buildProjectedShadows(objectDescriptors, objectSourceCount, objectEventSpriteFlags, objectFootRows);
       this.writeObjectSources(objectSourcePixels, objectSourceCount);

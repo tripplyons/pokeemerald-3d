@@ -126,6 +126,8 @@ let visualModeTransition = null;
 let image;
 let worldPixels;
 let worldHeightPixels;
+let worldGroundHeightPixels;
+let worldGeometryPixels;
 let layerPixels;
 let objectIds;
 let bgPriorities;
@@ -862,6 +864,16 @@ function refreshFrameImage() {
     instance.exports.WasmWorldHeightBuffer(),
     instance.exports.WasmWorldHeightBufferSize(),
   );
+  worldGroundHeightPixels = new Int8Array(
+    memory.buffer,
+    instance.exports.WasmWorldGroundHeightBuffer(),
+    instance.exports.WasmWorldGroundHeightBufferSize(),
+  );
+  worldGeometryPixels = new Uint16Array(
+    memory.buffer,
+    instance.exports.WasmWorldGeometryBuffer(),
+    instance.exports.WasmWorldGeometryBufferSize() / 2,
+  );
   layerPixels = new Uint8Array(
     memory.buffer,
     instance.exports.WasmDisplayLayerBuffer(),
@@ -920,6 +932,8 @@ function render() {
     finalPixels: image.data,
     worldPixels,
     worldHeightPixels,
+    worldGroundHeightPixels,
+    worldGeometryPixels,
     worldGridOffsetX: instance.exports.WasmWorldGridOffsetX(),
     worldGridOffsetY: instance.exports.WasmWorldGridOffsetY(),
     worldPixelOriginX: instance.exports.WasmWorldPixelOriginX(),

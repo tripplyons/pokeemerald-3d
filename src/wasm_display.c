@@ -2,12 +2,14 @@
 
 #include "global.h"
 #include "constants/map_types.h"
+#include "constants/metatile_behaviors.h"
 #include "gba/defines.h"
 #include "gba/io_reg.h"
 #include "main.h"
 #include "overworld.h"
 #include "field_camera.h"
 #include "fieldmap.h"
+#include "metatile_behavior.h"
 #include "sprite.h"
 
 extern u32 WasmOamCount(void);
@@ -25,14 +27,33 @@ extern void WasmApplyTilesetAnimations(const struct Tileset *tileset, u8 *dest, 
 #define HD2D_WORLD_HEIGHT 768
 #define HD2D_WORLD_PIXELS (HD2D_WORLD_WIDTH * HD2D_WORLD_HEIGHT)
 #define HD2D_TILE_WIDTH 8
-#define HD2D_SAMPLE_COLS (HD2D_WORLD_WIDTH / 16 + 2)
-#define HD2D_SAMPLE_ROWS (HD2D_WORLD_HEIGHT / 16 + 2)
+#define HD2D_GEOMETRY_RADIUS 8
+#define HD2D_SAMPLE_COLS (HD2D_WORLD_WIDTH / 16 + HD2D_GEOMETRY_RADIUS * 2 + 2)
+#define HD2D_SAMPLE_ROWS (HD2D_WORLD_HEIGHT / 16 + HD2D_GEOMETRY_RADIUS * 2 + 2)
+#define HD2D_GEOMETRY_CACHE_COUNT 8
+#define HD2D_GEOMETRY_VALID_BYTES (NUM_METATILES_TOTAL / 8)
+#define HD2D_COURSE_HEIGHT 8
+#define HD2D_COURSE_COLS (HD2D_SAMPLE_COLS * 2)
+#define HD2D_COURSE_ROWS (HD2D_SAMPLE_ROWS * 2)
+#define HD2D_COURSE_COUNT (HD2D_COURSE_COLS * HD2D_COURSE_ROWS)
+#define HD2D_BUILDING_COUNT (HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS)
 #define HD2D_WORLD_OFFSET_X ((HD2D_WORLD_WIDTH - DISPLAY_WIDTH) / 2)
 #define HD2D_WORLD_OFFSET_Y ((HD2D_WORLD_HEIGHT - DISPLAY_HEIGHT) / 2)
 #define RGBA_CHANNELS 4
 #define OBJECT_SOURCE_SIZE 64
 #define OBJECT_DESCRIPTOR_WORDS 16
 #define OAM_ENTRY_COUNT 128
+
+enum HdSurface
+{
+    HD_SURFACE_GROUND,
+    HD_SURFACE_WATER,
+    HD_SURFACE_DECK,
+    HD_SURFACE_TERRAIN,
+    HD_SURFACE_OBSTACLE,
+    HD_SURFACE_WALL,
+    HD_SURFACE_ROOF,
+};
 
 #define LAYER_BG0 0x01
 #define LAYER_BG1 0x02
@@ -83,6 +104,8 @@ static u8 sWasmWorldRgba[HD2D_WORLD_PIXELS * RGBA_CHANNELS];
 static u8 sWasmWorldLayerData[HD2D_WORLD_PIXELS];
 static u8 sWasmBgPriorityData[HD2D_WORLD_PIXELS];
 static s8 sWasmWorldHeightData[HD2D_WORLD_PIXELS];
+static s8 sWasmWorldGroundHeightData[HD2D_WORLD_PIXELS];
+static u16 sWasmWorldGeometryData[HD2D_WORLD_PIXELS];
 static s32 sWasmWorldPixelOriginX;
 static s32 sWasmWorldPixelOriginY;
 static u8 sWasmObjectRgba[DISPLAY_PIXELS * RGBA_CHANNELS];
@@ -893,11 +916,19 @@ struct HdMapSample
 {
     const struct MapLayout *layout;
     u16 metatileId;
+    u8 collision;
     bool8 valid;
 };
 
 static struct HdMapSample sHdMapSamples[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
 static u16 sHdMapAttributes[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
+static s8 sHdCourseHeights[HD2D_COURSE_COUNT];
+static s8 sHdCourseGroundHeights[HD2D_COURSE_COUNT];
+static u16 sHdCourseGeometry[HD2D_COURSE_COUNT];
+static s16 sHdCourseBuilding[HD2D_COURSE_COUNT];
+static u8 sHdCourseBuildingKind[HD2D_COURSE_COUNT];
+static u16 sHdCourseVisit[HD2D_COURSE_COUNT];
+static u16 sHdCourseQueue[HD2D_COURSE_COUNT];
 
 struct HdTilesetCache
 {
@@ -908,8 +939,38 @@ struct HdTilesetCache
     u16 displayPalettes[16 * 16];
 };
 
+struct HdGeometryCache
+{
+    const struct Tileset *primaryTileset;
+    const struct Tileset *secondaryTileset;
+    u8 coverage[2][4][NUM_METATILES_TOTAL];
+    u8 valid[2][HD2D_GEOMETRY_VALID_BYTES];
+};
+
+struct HdBuilding
+{
+    u16 parent;
+    u16 componentId;
+    s8 base;
+    s8 roofHeight;
+    bool8 hasDoor;
+    bool8 truncated;
+};
+
+#define HD_BUILDING_ROOF 0x01
+#define HD_BUILDING_WALL 0x02
+
+static struct HdBuilding sHdBuildings[HD2D_BUILDING_COUNT];
+static u16 sHdBuildingCount;
+static u16 sHdRenderCourseMinX;
+static u16 sHdRenderCourseMinY;
+static u16 sHdRenderCourseMaxX;
+static u16 sHdRenderCourseMaxY;
+
 static struct HdTilesetCache sHdTilesetCaches[16];
 static u8 sHdTilesetCacheNext;
+static struct HdGeometryCache sHdGeometryCaches[HD2D_GEOMETRY_CACHE_COUNT];
+static u8 sHdGeometryCacheNext;
 
 static const u8 *HdTilesetPixels(const struct Tileset *tileset)
 {
@@ -978,11 +1039,22 @@ static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
     const s32 localY = mapY - MAP_OFFSET;
 
     sample->layout = current;
+    sample->collision = 0;
     sample->valid = FALSE;
     if (localX >= 0 && localY >= 0 && localX < current->width && localY < current->height)
     {
         const u16 block = gBackupMapLayout.map[mapY * gBackupMapLayout.width + mapX];
-        sample->metatileId = block == MAPGRID_UNDEFINED ? MapGridGetMetatileIdAt(mapX, mapY) : UNPACK_METATILE(block);
+
+        if (block == MAPGRID_UNDEFINED)
+        {
+            sample->metatileId = MapGridGetMetatileIdAt(mapX, mapY);
+            sample->collision = MapGridGetCollisionAt(mapX, mapY);
+        }
+        else
+        {
+            sample->metatileId = UNPACK_METATILE(block);
+            sample->collision = UNPACK_COLLISION(block);
+        }
         sample->valid = TRUE;
         return TRUE;
     }
@@ -1025,12 +1097,14 @@ static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
                 const u16 block = layout->map[y * layout->width + x];
                 sample->layout = layout;
                 sample->metatileId = UNPACK_METATILE(block);
+                sample->collision = UNPACK_COLLISION(block);
                 sample->valid = TRUE;
                 return TRUE;
             }
         }
     }
     sample->metatileId = MapGridGetMetatileIdAt(mapX, mapY);
+    sample->collision = MapGridGetCollisionAt(mapX, mapY);
     return FALSE;
 }
 
@@ -1126,9 +1200,493 @@ static u16 HdMetatileAttributes(const struct MapLayout *layout, u16 metatileId)
     return 0;
 }
 
+static struct HdGeometryCache *HdGeometryCacheForLayout(const struct MapLayout *layout)
+{
+    struct HdGeometryCache *cache = NULL;
+
+    for (u32 i = 0; i < ARRAY_COUNT(sHdGeometryCaches); i++)
+    {
+        if (sHdGeometryCaches[i].primaryTileset == layout->primaryTileset
+         && sHdGeometryCaches[i].secondaryTileset == layout->secondaryTileset)
+            return &sHdGeometryCaches[i];
+        if (cache == NULL && sHdGeometryCaches[i].primaryTileset == NULL)
+            cache = &sHdGeometryCaches[i];
+    }
+    if (cache == NULL)
+        cache = &sHdGeometryCaches[sHdGeometryCacheNext++ % ARRAY_COUNT(sHdGeometryCaches)];
+    cache->primaryTileset = layout->primaryTileset;
+    cache->secondaryTileset = layout->secondaryTileset;
+    for (u32 plane = 0; plane < ARRAY_COUNT(cache->valid); plane++)
+        for (u32 i = 0; i < ARRAY_COUNT(cache->valid[plane]); i++)
+            cache->valid[plane][i] = 0;
+    return cache;
+}
+
+static u8 HdMetatileQuadrantCoverage(const struct HdMapSample *sample, u8 plane, u8 quadrant)
+{
+    struct HdGeometryCache *cache = HdGeometryCacheForLayout(sample->layout);
+    struct Rgb color;
+    u16 metatileId = sample->metatileId;
+
+    if (metatileId >= NUM_METATILES_TOTAL)
+        metatileId = 0;
+    if (!(cache->valid[plane][metatileId >> 3] & (1 << (metatileId & 7))))
+    {
+        for (u32 currentQuadrant = 0; currentQuadrant < 4; currentQuadrant++)
+        {
+            u8 coverage = 0;
+
+            for (u32 y = 0; y < HD2D_TILE_WIDTH; y++)
+            {
+                for (u32 x = 0; x < HD2D_TILE_WIDTH; x++)
+                {
+                    if (HdMetatilePixel(sample->layout, metatileId, plane,
+                                        currentQuadrant, x, y, &color))
+                        coverage++;
+                }
+            }
+            cache->coverage[plane][currentQuadrant][metatileId] = coverage;
+        }
+        cache->valid[plane][metatileId >> 3] |= 1 << (metatileId & 7);
+    }
+    return cache->coverage[plane][quadrant][metatileId];
+}
+
+static u16 HdMetatileCoverage(const struct HdMapSample *sample, u8 plane)
+{
+    u16 coverage = 0;
+
+    for (u32 quadrant = 0; quadrant < 4; quadrant++)
+        coverage += HdMetatileQuadrantCoverage(sample, plane, quadrant);
+    return coverage;
+}
+
+static bool8 HdMapSampleIsDoorCourse(u32 index)
+{
+    const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
+
+    return MetatileBehavior_IsDoor(behavior)
+        || MetatileBehavior_IsNonAnimDoor(behavior);
+}
+
+static bool8 HdMapSampleIsCoveredCourse(u32 index)
+{
+    return sHdMapSamples[index].valid
+        && UNPACK_BEHAVIOR(sHdMapAttributes[index]) == MB_NORMAL
+        && UNPACK_LAYER_TYPE(sHdMapAttributes[index]) == METATILE_LAYER_TYPE_COVERED;
+}
+
+static bool8 HdMapSampleIsWallCandidate(u32 index)
+{
+    if (!sHdMapSamples[index].valid)
+        return FALSE;
+    if (HdMapSampleIsDoorCourse(index) || HdMapSampleIsCoveredCourse(index))
+        return TRUE;
+    return FALSE;
+}
+
+static bool8 HdMapSampleIsStructuralMaterial(u32 index)
+{
+    const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
+
+    return !MetatileBehavior_IsSurfableWaterOrUnderwater(behavior)
+        && !MetatileBehavior_IsBridgeOverWater(behavior)
+        && !MetatileBehavior_IsFortreeBridge(behavior)
+        && !MetatileBehavior_IsPacifidlogLog(behavior)
+        && behavior != MB_REFLECTION_UNDER_BRIDGE;
+}
+
+static bool8 HdMapSampleHasTopArt(u32 index)
+{
+    return sHdMapSamples[index].valid
+        && HdMetatileCoverage(&sHdMapSamples[index], 1) != 0;
+}
+
+static bool8 HdCourseHasTopArt(u32 courseX, u32 courseY, u32 sampleCols)
+{
+    const u32 sampleX = courseX / 2;
+    const u32 sampleY = courseY / 2;
+    const u32 sample = sampleY * sampleCols + sampleX;
+    const u8 quadrant = (courseY & 1) * 2 + (courseX & 1);
+
+    return sHdMapSamples[sample].valid
+        && HdMetatileQuadrantCoverage(&sHdMapSamples[sample], 1, quadrant) != 0;
+}
+
+static bool8 HdMapSampleIsTerrainWallCandidate(u32 index, u32 sampleX, u32 sampleCols)
+{
+    if (!HdMapSampleIsCoveredCourse(index))
+        return FALSE;
+    if (sHdMapSamples[index].collision)
+        return TRUE;
+    return (sampleX > 0
+         && HdMapSampleIsCoveredCourse(index - 1)
+         && sHdMapSamples[index - 1].collision)
+        || (sampleX + 1 < sampleCols
+         && HdMapSampleIsCoveredCourse(index + 1)
+         && sHdMapSamples[index + 1].collision);
+}
+
+static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
+{
+    return sHdMapSamples[index].valid
+        && sHdMapSamples[index].collision
+        && HdMapSampleIsStructuralMaterial(index)
+        && (HdMetatileCoverage(&sHdMapSamples[index], 0)
+          + HdMetatileCoverage(&sHdMapSamples[index], 1) != 0);
+}
+
+static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols)
+{
+    return HdMapSampleIsWallCandidate(index)
+        && HdMapSampleIsOpaqueBlocked(index - sampleCols)
+        && sHdMapSamples[index + sampleCols].valid
+        && !sHdMapSamples[index + sampleCols].collision;
+}
+
+static bool8 HdMapSampleIsFacadeSpanCell(u32 index, u32 sampleCols)
+{
+    return HdMapSampleIsStructuralMaterial(index)
+        && HdMapSampleHasTopArt(index)
+        && HdMapSampleHasTopArt(index - sampleCols);
+}
+
+static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX, u32 sampleCols)
+{
+    for (u32 x = startX; x <= endX; x++)
+    {
+        const u32 index = row * sampleCols + x;
+
+        if (!HdMapSampleIsStructuralMaterial(index)
+         || !HdMapSampleHasTopArt(index)
+         || UNPACK_LAYER_TYPE(sHdMapAttributes[index]) != METATILE_LAYER_TYPE_COVERED)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static bool8 HdMapSampleIsTerrainCourse(u32 index, u32 sampleX, u32 sampleY,
+                                        u32 sampleCols)
+{
+    const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
+
+    if (MetatileBehavior_IsMountain(behavior)
+     || (behavior == MB_CAVE && sHdMapSamples[index].collision))
+        return TRUE;
+    if (!HdMapSampleIsTerrainWallCandidate(index, sampleX, sampleCols))
+        return FALSE;
+    for (u32 distance = 1; distance <= 4 && distance <= sampleY; distance++)
+    {
+        const u32 above = index - distance * sampleCols;
+        const u8 aboveBehavior = UNPACK_BEHAVIOR(sHdMapAttributes[above]);
+
+        if (MetatileBehavior_IsMountain(aboveBehavior)
+         || (aboveBehavior == MB_CAVE && sHdMapSamples[above].collision))
+            return TRUE;
+        if (!HdMapSampleIsOpaqueBlocked(above)
+         && !HdMapSampleIsTerrainWallCandidate(above, sampleX, sampleCols))
+            break;
+    }
+    return FALSE;
+}
+
+static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
+                                 u32 sampleCols)
+{
+    const struct HdMapSample *sample = &sHdMapSamples[index];
+    const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
+
+    if (gMapHeader.mapType == MAP_TYPE_INDOOR
+     || gMapHeader.mapType == MAP_TYPE_SECRET_BASE)
+        return HD_SURFACE_GROUND;
+    if (MetatileBehavior_IsBridgeOverWater(behavior)
+     || MetatileBehavior_IsFortreeBridge(behavior)
+     || MetatileBehavior_IsPacifidlogLog(behavior)
+     || behavior == MB_REFLECTION_UNDER_BRIDGE)
+        return HD_SURFACE_DECK;
+    if (MetatileBehavior_IsSurfableWaterOrUnderwater(behavior)
+     && !MetatileBehavior_IsWaterfall(behavior))
+        return HD_SURFACE_WATER;
+    if (HdMapSampleIsTerrainCourse(index, sampleX, sampleY, sampleCols))
+        return HD_SURFACE_TERRAIN;
+    if (sample->collision
+     && HdMetatileCoverage(sample, 0) + HdMetatileCoverage(sample, 1) != 0)
+        return HD_SURFACE_OBSTACLE;
+    return HD_SURFACE_GROUND;
+}
+
+static s8 HdSurfaceBaseHeight(u8 surface)
+{
+    switch (surface)
+    {
+    case HD_SURFACE_WATER:
+        return -4;
+    case HD_SURFACE_DECK:
+        return 4;
+    case HD_SURFACE_TERRAIN:
+        return 24;
+    case HD_SURFACE_OBSTACLE:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+static u16 HdFindBuilding(u16 building)
+{
+    u16 root = building;
+
+    while (sHdBuildings[root].parent != root)
+        root = sHdBuildings[root].parent;
+    while (sHdBuildings[building].parent != building)
+    {
+        const u16 next = sHdBuildings[building].parent;
+        sHdBuildings[building].parent = root;
+        building = next;
+    }
+    return root;
+}
+
+static bool8 HdBuildingsMatch(u16 first, u16 second)
+{
+    return sHdBuildings[first].base == sHdBuildings[second].base
+        && sHdBuildings[first].roofHeight == sHdBuildings[second].roofHeight;
+}
+
+static void HdUnionBuildings(u16 first, u16 second)
+{
+    first = HdFindBuilding(first);
+    second = HdFindBuilding(second);
+    if (first != second && HdBuildingsMatch(first, second))
+        sHdBuildings[second].parent = first;
+}
+
+static void HdClaimBuildingCourse(u32 courseX, u32 courseY, u32 courseCols,
+                                  u16 building, u8 kind)
+{
+    const u32 course = courseY * courseCols + courseX;
+    const s16 owner = sHdCourseBuilding[course];
+
+    if (owner >= 0 && HdBuildingsMatch(building, owner))
+    {
+        HdUnionBuildings(building, owner);
+        sHdCourseBuildingKind[course] |= kind;
+    }
+    else if (owner < 0)
+    {
+        sHdCourseBuilding[course] = building;
+        sHdCourseBuildingKind[course] = kind;
+    }
+
+    if (courseX == 0 || courseY == 0 || courseX + 1 == courseCols
+     || courseX <= sHdRenderCourseMinX || courseY <= sHdRenderCourseMinY
+     || courseX + 1 >= sHdRenderCourseMaxX || courseY + 1 >= sHdRenderCourseMaxY)
+        sHdBuildings[building].truncated = TRUE;
+
+    if (courseX > 0)
+    {
+        const s16 neighbor = sHdCourseBuilding[course - 1];
+        if (neighbor >= 0 && HdBuildingsMatch(building, neighbor))
+            HdUnionBuildings(building, neighbor);
+    }
+    if (courseY > 0)
+    {
+        const s16 neighbor = sHdCourseBuilding[course - courseCols];
+        if (neighbor >= 0 && HdBuildingsMatch(building, neighbor))
+            HdUnionBuildings(building, neighbor);
+    }
+}
+
+static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
+                                u32 spanEnd, u32 sampleCols, u32 courseCols)
+{
+    const u32 minY = seedY > HD2D_GEOMETRY_RADIUS * 2
+        ? seedY - HD2D_GEOMETRY_RADIUS * 2 : 0;
+    const u16 visit = building + 1;
+    u32 queueStart = 0;
+    u32 queueEnd = 0;
+
+    for (u32 courseX = spanStart; courseX < spanEnd; courseX++)
+    {
+        const u32 course = seedY * courseCols + courseX;
+        sHdCourseVisit[course] = visit;
+        sHdCourseQueue[queueEnd++] = course;
+    }
+    while (queueStart < queueEnd)
+    {
+        const u32 course = sHdCourseQueue[queueStart++];
+        const u32 courseX = course % courseCols;
+        const u32 courseY = course / courseCols;
+        const s32 nextX[3] = {(s32)courseX - 1, (s32)courseX + 1, (s32)courseX};
+        const s32 nextY[3] = {(s32)courseY, (s32)courseY, (s32)courseY - 1};
+
+        HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_ROOF);
+        if (courseY == minY)
+        {
+            if (courseY > 0 && HdCourseHasTopArt(courseX, courseY - 1, sampleCols))
+                sHdBuildings[building].truncated = TRUE;
+            continue;
+        }
+        for (u32 direction = 0; direction < ARRAY_COUNT(nextX); direction++)
+        {
+            u32 next;
+
+            if (nextX[direction] < (s32)spanStart || nextX[direction] >= (s32)spanEnd
+             || nextY[direction] < (s32)minY || nextY[direction] > (s32)seedY)
+                continue;
+            next = nextY[direction] * courseCols + nextX[direction];
+            if (sHdCourseVisit[next] == visit
+             || !HdCourseHasTopArt(nextX[direction], nextY[direction], sampleCols))
+                continue;
+            sHdCourseVisit[next] = visit;
+            sHdCourseQueue[queueEnd++] = next;
+        }
+    }
+}
+
+static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
+                                         u32 renderSampleMinX, u32 renderSampleMinY,
+                                         u32 renderSampleMaxX, u32 renderSampleMaxY)
+{
+    const u32 courseCols = sampleCols * 2;
+    const u32 courseRows = sampleRows * 2;
+
+    if (gMapHeader.mapType == MAP_TYPE_INDOOR
+     || gMapHeader.mapType == MAP_TYPE_SECRET_BASE)
+        return;
+
+    sHdBuildingCount = 0;
+    sHdRenderCourseMinX = renderSampleMinX * 2;
+    sHdRenderCourseMinY = renderSampleMinY * 2;
+    sHdRenderCourseMaxX = renderSampleMaxX * 2;
+    sHdRenderCourseMaxY = renderSampleMaxY * 2;
+
+    // Collect complete supported facade bands before asking whether any one
+    // band owns a door. This lets stepped and overhanging authored courses join
+    // one shell instead of dropping every non-door section independently.
+    for (u32 y = 1; y + 1 < sampleRows; y++)
+    {
+        for (u32 x = 0; x < sampleCols;)
+        {
+            u32 coreStart;
+            u32 coreEnd;
+            u32 spanStart;
+            u32 spanEnd;
+            u32 wallTop;
+            u32 wallStartCourse;
+            u32 wallEndCourse;
+            u32 spanStartCourse;
+            u32 spanEndCourse;
+            u32 supportCourse;
+            s16 roofHeight;
+            u16 building;
+
+            if (!HdMapSampleIsSupportedWallCore(y * sampleCols + x, sampleCols))
+            {
+                x++;
+                continue;
+            }
+            coreStart = x;
+            while (x + 1 < sampleCols
+                && HdMapSampleIsSupportedWallCore(y * sampleCols + x + 1, sampleCols))
+                x++;
+            coreEnd = x;
+
+            spanStart = coreStart;
+            spanEnd = coreEnd;
+            while (spanStart > 0
+                && HdMapSampleIsFacadeSpanCell(y * sampleCols + spanStart - 1, sampleCols))
+                spanStart--;
+            while (spanEnd + 1 < sampleCols
+                && HdMapSampleIsFacadeSpanCell(y * sampleCols + spanEnd + 1, sampleCols))
+                spanEnd++;
+
+            wallTop = y;
+            while (wallTop > 1 && y - wallTop < HD2D_GEOMETRY_RADIUS
+                && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols))
+                wallTop--;
+            wallStartCourse = (wallTop - 1) * 2 + 1;
+            wallEndCourse = y * 2 + 2;
+            spanStartCourse = spanStart * 2;
+            spanEndCourse = (spanEnd + 1) * 2;
+            supportCourse = ((y + 1) * 2) * courseCols + (coreStart + coreEnd + 1);
+            roofHeight = sHdCourseGroundHeights[supportCourse]
+                       + (wallEndCourse - wallStartCourse) * HD2D_COURSE_HEIGHT;
+            if (sHdBuildingCount >= ARRAY_COUNT(sHdBuildings) || roofHeight > 127)
+            {
+                x = spanEnd + 1;
+                continue;
+            }
+
+            building = sHdBuildingCount++;
+            sHdBuildings[building].parent = building;
+            sHdBuildings[building].componentId = 0;
+            sHdBuildings[building].base = sHdCourseGroundHeights[supportCourse];
+            sHdBuildings[building].roofHeight = roofHeight;
+            sHdBuildings[building].hasDoor = FALSE;
+            sHdBuildings[building].truncated = spanStart == 0 || spanEnd + 1 == sampleCols;
+
+            for (u32 wallY = wallTop; wallY <= y; wallY++)
+            {
+                for (u32 wallX = spanStart; wallX <= spanEnd; wallX++)
+                    sHdBuildings[building].hasDoor |= HdMapSampleIsDoorCourse(wallY * sampleCols + wallX);
+            }
+            for (u32 courseY = wallStartCourse; courseY < wallEndCourse; courseY++)
+            {
+                for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
+                    HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
+            }
+            HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
+                                spanEndCourse, sampleCols, courseCols);
+            x = spanEnd + 1;
+        }
+    }
+
+    // Touching, height-compatible roof/facade bands have already been unioned
+    // while claimed. Only now require one semantic door for the whole connected
+    // building and reject roots clipped by either semantic or atlas boundary.
+    for (u16 building = 0; building < sHdBuildingCount; building++)
+    {
+        const u16 root = HdFindBuilding(building);
+        if (root != building)
+        {
+            sHdBuildings[root].hasDoor |= sHdBuildings[building].hasDoor;
+            sHdBuildings[root].truncated |= sHdBuildings[building].truncated;
+        }
+    }
+    {
+        u16 nextComponent = 1;
+
+        for (u32 course = 0; course < courseRows * courseCols; course++)
+        {
+            const s16 owner = sHdCourseBuilding[course];
+            u16 root;
+            u8 surface;
+
+            if (owner < 0)
+                continue;
+            root = HdFindBuilding(owner);
+            if (!sHdBuildings[root].hasDoor || sHdBuildings[root].truncated)
+                continue;
+            if (sHdBuildings[root].componentId == 0)
+            {
+                if (nextComponent > (0xffff >> 3))
+                    continue;
+                sHdBuildings[root].componentId = nextComponent++;
+            }
+            surface = sHdCourseBuildingKind[course] & HD_BUILDING_WALL
+                ? HD_SURFACE_WALL : HD_SURFACE_ROOF;
+            sHdCourseGeometry[course] = (sHdBuildings[root].componentId << 3) | surface;
+            sHdCourseGroundHeights[course] = sHdBuildings[root].base;
+            sHdCourseHeights[course] = surface == HD_SURFACE_ROOF
+                ? sHdBuildings[root].roofHeight : sHdBuildings[root].base;
+        }
+    }
+}
+
 static bool8 MapWorldPixel(s32 screenX, s32 screenY, s16 cameraOffsetX, s16 cameraOffsetY,
                            const struct HdMapSample *sample, u16 attributes,
-                           struct Rgb *color, u8 *layer, s8 *height)
+                           struct Rgb *color, u8 *layer)
 {
     const s32 viewX = screenX + cameraOffsetX;
     const s32 viewY = screenY + cameraOffsetY;
@@ -1151,7 +1709,6 @@ static bool8 MapWorldPixel(s32 screenX, s32 screenY, s16 cameraOffsetX, s16 came
     {
         *color = (struct Rgb){0};
         *layer = LAYER_BACKDROP;
-        *height = 0;
         return FALSE;
     }
 
@@ -1196,11 +1753,6 @@ static bool8 MapWorldPixel(s32 screenX, s32 screenY, s16 cameraOffsetX, s16 came
                                    mask & LAYER_BACKDROP, scanlineY);
     }
 
-    // Collision, behavior, and elevation are gameplay masks rather than a
-    // visual height map. Treating them as geometry tears buildings and
-    // decorations apart and can sink actors into walkable mountain-top cells.
-    // Preserve authored pixel-art depth on one coherent perspective plane.
-    *height = 0;
     return TRUE;
 }
 
@@ -1236,10 +1788,17 @@ static void RenderHd2dWorld(u16 dispcnt)
     // overscan atlas. The sum stays continuous through sub-tile camera motion.
     sWasmWorldPixelOriginX = gSaveBlock1Ptr->pos.x * 16 - HD2D_WORLD_OFFSET_X + cameraOffsetX;
     sWasmWorldPixelOriginY = gSaveBlock1Ptr->pos.y * 16 - HD2D_WORLD_OFFSET_Y + cameraOffsetY;
-    const s32 minMapX = gSaveBlock1Ptr->pos.x + FloorDiv16(-HD2D_WORLD_OFFSET_X + cameraOffsetX);
-    const s32 minMapY = gSaveBlock1Ptr->pos.y + FloorDiv16(-HD2D_WORLD_OFFSET_Y + cameraOffsetY);
-    const s32 maxMapX = gSaveBlock1Ptr->pos.x + FloorDiv16(HD2D_WORLD_WIDTH - HD2D_WORLD_OFFSET_X - 1 + cameraOffsetX);
-    const s32 maxMapY = gSaveBlock1Ptr->pos.y + FloorDiv16(HD2D_WORLD_HEIGHT - HD2D_WORLD_OFFSET_Y - 1 + cameraOffsetY);
+    const s32 renderMinMapX = gSaveBlock1Ptr->pos.x + FloorDiv16(-HD2D_WORLD_OFFSET_X + cameraOffsetX);
+    const s32 renderMinMapY = gSaveBlock1Ptr->pos.y + FloorDiv16(-HD2D_WORLD_OFFSET_Y + cameraOffsetY);
+    const s32 renderMaxMapX = gSaveBlock1Ptr->pos.x + FloorDiv16(HD2D_WORLD_WIDTH - HD2D_WORLD_OFFSET_X - 1 + cameraOffsetX);
+    const s32 renderMaxMapY = gSaveBlock1Ptr->pos.y + FloorDiv16(HD2D_WORLD_HEIGHT - HD2D_WORLD_OFFSET_Y - 1 + cameraOffsetY);
+    // Keep the semantic neighborhood wider than the texture atlas. Complete
+    // roof and facade spans remain stable while entering the visible overscan
+    // instead of changing class when their authored support is just offscreen.
+    const s32 minMapX = renderMinMapX - HD2D_GEOMETRY_RADIUS;
+    const s32 minMapY = renderMinMapY - HD2D_GEOMETRY_RADIUS;
+    const s32 maxMapX = renderMaxMapX + HD2D_GEOMETRY_RADIUS;
+    const s32 maxMapY = renderMaxMapY + HD2D_GEOMETRY_RADIUS;
     const u32 sampleCols = maxMapX - minMapX + 1;
     const u32 sampleRows = maxMapY - minMapY + 1;
 
@@ -1253,6 +1812,36 @@ static void RenderHd2dWorld(u16 dispcnt)
                                                            sHdMapSamples[index].metatileId);
         }
     }
+    // Resolve the visual and receiver contracts on independent 8x8 authored
+    // courses. A metatile plane (bottom/top BG data) is never treated as its
+    // north/south course; only local source coordinates select the course.
+    {
+        const u32 courseCols = sampleCols * 2;
+        const u32 courseRows = sampleRows * 2;
+
+        for (u32 courseY = 0; courseY < courseRows; courseY++)
+        {
+            for (u32 courseX = 0; courseX < courseCols; courseX++)
+            {
+                const u32 course = courseY * courseCols + courseX;
+                const u32 sampleX = courseX / 2;
+                const u32 sampleY = courseY / 2;
+                const u32 sample = sampleY * sampleCols + sampleX;
+                const u8 surface = HdMapSampleBaseSurface(sample, sampleX, sampleY, sampleCols);
+                const s8 height = HdSurfaceBaseHeight(surface);
+
+                sHdCourseGeometry[course] = surface;
+                sHdCourseHeights[course] = height;
+                sHdCourseGroundHeights[course] = height;
+                sHdCourseBuilding[course] = -1;
+                sHdCourseBuildingKind[course] = 0;
+                sHdCourseVisit[course] = 0;
+            }
+        }
+        HdClassifyBuildingComponents(sampleCols, sampleRows,
+                                     renderMinMapX - minMapX, renderMinMapY - minMapY,
+                                     renderMaxMapX - minMapX + 1, renderMaxMapY - minMapY + 1);
+    }
     for (u32 y = 0; y < HD2D_WORLD_HEIGHT; y++)
     {
         for (u32 x = 0; x < HD2D_WORLD_WIDTH; x++)
@@ -1263,14 +1852,20 @@ static void RenderHd2dWorld(u16 dispcnt)
             const u32 p = pixel * RGBA_CHANNELS;
             struct Rgb color;
             u8 layer;
-            s8 height;
 
-            const s32 mapX = gSaveBlock1Ptr->pos.x + FloorDiv16(screenX + cameraOffsetX);
-            const s32 mapY = gSaveBlock1Ptr->pos.y + FloorDiv16(screenY + cameraOffsetY);
+            const s32 viewX = screenX + cameraOffsetX;
+            const s32 viewY = screenY + cameraOffsetY;
+            const s32 mapX = gSaveBlock1Ptr->pos.x + FloorDiv16(viewX);
+            const s32 mapY = gSaveBlock1Ptr->pos.y + FloorDiv16(viewY);
+            const u32 courseX = (mapX - minMapX) * 2
+                              + (viewX - FloorDiv16(viewX) * 16) / HD2D_TILE_WIDTH;
+            const u32 courseY = (mapY - minMapY) * 2
+                              + (viewY - FloorDiv16(viewY) * 16) / HD2D_TILE_WIDTH;
+            const u32 courseIndex = courseY * sampleCols * 2 + courseX;
             const u32 sampleIndex = (mapY - minMapY) * sampleCols + mapX - minMapX;
             const bool8 mapVisible = MapWorldPixel(screenX, screenY, cameraOffsetX, cameraOffsetY,
                                                    &sHdMapSamples[sampleIndex], sHdMapAttributes[sampleIndex],
-                                                   &color, &layer, &height);
+                                                   &color, &layer);
             sWasmWorldRgba[p] = color.r;
             sWasmWorldRgba[p + 1] = color.g;
             sWasmWorldRgba[p + 2] = color.b;
@@ -1284,7 +1879,9 @@ static void RenderHd2dWorld(u16 dispcnt)
                 sWasmBgPriorityData[pixel] = ReadU16(REG_BASE + REG_OFFSET_BG3CNT) & 3;
             else
                 sWasmBgPriorityData[pixel] = 4;
-            sWasmWorldHeightData[pixel] = height;
+            sWasmWorldHeightData[pixel] = sHdCourseHeights[courseIndex];
+            sWasmWorldGroundHeightData[pixel] = sHdCourseGroundHeights[courseIndex];
+            sWasmWorldGeometryData[pixel] = sHdCourseGeometry[courseIndex];
         }
     }
 }
@@ -1462,6 +2059,26 @@ s8 *WasmWorldHeightBuffer(void)
 u32 WasmWorldHeightBufferSize(void)
 {
     return sizeof(sWasmWorldHeightData);
+}
+
+s8 *WasmWorldGroundHeightBuffer(void)
+{
+    return sWasmWorldGroundHeightData;
+}
+
+u32 WasmWorldGroundHeightBufferSize(void)
+{
+    return sizeof(sWasmWorldGroundHeightData);
+}
+
+u16 *WasmWorldGeometryBuffer(void)
+{
+    return sWasmWorldGeometryData;
+}
+
+u32 WasmWorldGeometryBufferSize(void)
+{
+    return sizeof(sWasmWorldGeometryData);
 }
 
 u8 *WasmDisplayLayerBuffer(void)
