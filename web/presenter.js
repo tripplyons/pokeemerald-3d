@@ -1,5 +1,4 @@
 const HD2D_SURFACE_BITS = 3;
-const HD2D_SURFACE_GROUND = 0;
 export const HD2D_SURFACE_WATER = 1;
 export const HD2D_SURFACE_DECK = 2;
 export const HD2D_SURFACE_TERRAIN = 3;

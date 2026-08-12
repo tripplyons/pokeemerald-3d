@@ -979,25 +979,29 @@ struct HdGeometryCache
     u8 valid[2][HD2D_GEOMETRY_VALID_BYTES];
 };
 
-struct HdBuilding
+struct HdBuildingCandidate
 {
     u16 parent;
     u16 componentId;
-    s8 base;
+    s8 baseHeight;
     s8 roofHeight;
     bool8 hasEntrance;
-    bool8 truncated;
+    bool8 isClipped;
+};
+
+struct HdBuildingBounds
+{
+    u16 minCourseX;
+    u16 minCourseY;
+    u16 maxCourseX;
+    u16 maxCourseY;
 };
 
 #define HD_BUILDING_ROOF 0x01
 #define HD_BUILDING_WALL 0x02
 
-static struct HdBuilding sHdBuildings[HD2D_BUILDING_COUNT];
+static struct HdBuildingCandidate sHdBuildings[HD2D_BUILDING_COUNT];
 static u16 sHdBuildingCount;
-static u16 sHdRenderCourseMinX;
-static u16 sHdRenderCourseMinY;
-static u16 sHdRenderCourseMaxX;
-static u16 sHdRenderCourseMaxY;
 
 static struct HdTilesetCache sHdTilesetCaches[16];
 static u8 sHdTilesetCacheNext;
@@ -1765,7 +1769,7 @@ static void HdResolveOpenDeckReceivers(u32 courseCols, u32 courseRows)
     }
 }
 
-static u16 HdFindBuilding(u16 building)
+static u16 HdFindBuildingRoot(u16 building)
 {
     u16 root = building;
 
@@ -1780,18 +1784,26 @@ static u16 HdFindBuilding(u16 building)
     return root;
 }
 
-static bool8 HdBuildingsMatch(u16 first, u16 second)
+static bool8 HdBuildingHeightsEqual(u16 first, u16 second)
 {
-    return sHdBuildings[first].base == sHdBuildings[second].base
+    return sHdBuildings[first].baseHeight == sHdBuildings[second].baseHeight
         && sHdBuildings[first].roofHeight == sHdBuildings[second].roofHeight;
 }
 
-static void HdUnionBuildings(u16 first, u16 second)
+static void HdUnionBuildingRoots(u16 first, u16 second)
 {
-    first = HdFindBuilding(first);
-    second = HdFindBuilding(second);
-    if (first != second && HdBuildingsMatch(first, second))
+    first = HdFindBuildingRoot(first);
+    second = HdFindBuildingRoot(second);
+    if (first != second)
         sHdBuildings[second].parent = first;
+}
+
+static bool8 HdCourseTouchesBuildingBoundary(u32 courseX, u32 courseY, u32 courseCols,
+                                             const struct HdBuildingBounds *bounds)
+{
+    return courseX == 0 || courseY == 0 || courseX + 1 == courseCols
+        || courseX <= bounds->minCourseX || courseY <= bounds->minCourseY
+        || courseX + 1 >= bounds->maxCourseX || courseY + 1 >= bounds->maxCourseY;
 }
 
 static void HdClaimBuildingCourse(u32 courseX, u32 courseY, u32 courseCols,
@@ -1800,9 +1812,9 @@ static void HdClaimBuildingCourse(u32 courseX, u32 courseY, u32 courseCols,
     const u32 course = courseY * courseCols + courseX;
     const s16 owner = sHdCourseBuilding[course];
 
-    if (owner >= 0 && HdBuildingsMatch(building, owner))
+    if (owner >= 0 && HdBuildingHeightsEqual(building, owner))
     {
-        HdUnionBuildings(building, owner);
+        HdUnionBuildingRoots(building, owner);
         sHdCourseBuildingKind[course] |= kind;
     }
     else if (owner < 0)
@@ -1810,29 +1822,30 @@ static void HdClaimBuildingCourse(u32 courseX, u32 courseY, u32 courseCols,
         sHdCourseBuilding[course] = building;
         sHdCourseBuildingKind[course] = kind;
     }
+}
 
-    if (courseX == 0 || courseY == 0 || courseX + 1 == courseCols
-     || courseX <= sHdRenderCourseMinX || courseY <= sHdRenderCourseMinY
-     || courseX + 1 >= sHdRenderCourseMaxX || courseY + 1 >= sHdRenderCourseMaxY)
-        sHdBuildings[building].truncated = TRUE;
+static void HdUnionBuildingWithPriorNeighbors(u32 courseX, u32 courseY, u32 courseCols,
+                                              u16 building)
+{
+    const u32 course = courseY * courseCols + courseX;
 
     if (courseX > 0)
     {
         const s16 neighbor = sHdCourseBuilding[course - 1];
-        if (neighbor >= 0 && HdBuildingsMatch(building, neighbor))
-            HdUnionBuildings(building, neighbor);
+        if (neighbor >= 0 && HdBuildingHeightsEqual(building, neighbor))
+            HdUnionBuildingRoots(building, neighbor);
     }
     if (courseY > 0)
     {
         const s16 neighbor = sHdCourseBuilding[course - courseCols];
-        if (neighbor >= 0 && HdBuildingsMatch(building, neighbor))
-            HdUnionBuildings(building, neighbor);
+        if (neighbor >= 0 && HdBuildingHeightsEqual(building, neighbor))
+            HdUnionBuildingRoots(building, neighbor);
     }
 }
 
 static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
                                 u32 spanEnd, u32 sampleCols, u32 sampleRows,
-                                u32 courseCols)
+                                u32 courseCols, const struct HdBuildingBounds *bounds)
 {
     const u32 minY = seedY > HD2D_GEOMETRY_RADIUS * 2
         ? seedY - HD2D_GEOMETRY_RADIUS * 2 : 0;
@@ -1858,11 +1871,14 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
         const s32 nextY[3] = {(s32)courseY, (s32)courseY, (s32)courseY - 1};
 
         HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_ROOF);
+        if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
+            sHdBuildings[building].isClipped = TRUE;
+        HdUnionBuildingWithPriorNeighbors(courseX, courseY, courseCols, building);
         if (courseY == minY)
         {
             if (courseY > 0
              && HdCourseIsRoofCandidate(courseX, courseY - 1, sampleCols, sampleRows))
-                sHdBuildings[building].truncated = TRUE;
+                sHdBuildings[building].isClipped = TRUE;
             continue;
         }
         for (u32 direction = 0; direction < ARRAY_COUNT(nextX); direction++)
@@ -1882,22 +1898,12 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
     }
 }
 
-static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
-                                         u32 renderSampleMinX, u32 renderSampleMinY,
-                                         u32 renderSampleMaxX, u32 renderSampleMaxY)
+static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
+                                        const struct HdBuildingBounds *bounds)
 {
     const u32 courseCols = sampleCols * 2;
-    const u32 courseRows = sampleRows * 2;
-
-    if (gMapHeader.mapType == MAP_TYPE_INDOOR
-     || gMapHeader.mapType == MAP_TYPE_SECRET_BASE)
-        return;
 
     sHdBuildingCount = 0;
-    sHdRenderCourseMinX = renderSampleMinX * 2;
-    sHdRenderCourseMinY = renderSampleMinY * 2;
-    sHdRenderCourseMaxX = renderSampleMaxX * 2;
-    sHdRenderCourseMaxY = renderSampleMaxY * 2;
 
     // Collect complete supported facade bands before asking whether any one
     // band owns a door. This lets stepped and overhanging authored courses join
@@ -1959,10 +1965,10 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
             building = sHdBuildingCount++;
             sHdBuildings[building].parent = building;
             sHdBuildings[building].componentId = 0;
-            sHdBuildings[building].base = sHdCourseGroundHeights[supportCourse];
+            sHdBuildings[building].baseHeight = sHdCourseGroundHeights[supportCourse];
             sHdBuildings[building].roofHeight = roofHeight;
             sHdBuildings[building].hasEntrance = FALSE;
-            sHdBuildings[building].truncated = spanStart == 0 || spanEnd + 1 == sampleCols;
+            sHdBuildings[building].isClipped = spanStart == 0 || spanEnd + 1 == sampleCols;
 
             for (u32 wallY = wallTop; wallY <= y; wallY++)
             {
@@ -1977,13 +1983,23 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
             for (u32 courseY = wallStartCourse; courseY < wallEndCourse; courseY++)
             {
                 for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
+                {
                     HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
+                    if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
+                        sHdBuildings[building].isClipped = TRUE;
+                    HdUnionBuildingWithPriorNeighbors(courseX, courseY, courseCols, building);
+                }
             }
             HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
-                                spanEndCourse, sampleCols, sampleRows, courseCols);
+                                spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
             x = spanEnd + 1;
         }
     }
+}
+
+static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
+{
+    u16 nextComponent = 1;
 
     // Touching, height-compatible roof/facade bands have already been unioned
     // while claimed. Only now require one semantic entrance for the whole
@@ -1991,42 +2007,60 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
     // boundary.
     for (u16 building = 0; building < sHdBuildingCount; building++)
     {
-        const u16 root = HdFindBuilding(building);
+        const u16 root = HdFindBuildingRoot(building);
         if (root != building)
         {
             sHdBuildings[root].hasEntrance |= sHdBuildings[building].hasEntrance;
-            sHdBuildings[root].truncated |= sHdBuildings[building].truncated;
+            sHdBuildings[root].isClipped |= sHdBuildings[building].isClipped;
         }
     }
+
+    for (u32 course = 0; course < courseRows * courseCols; course++)
     {
-        u16 nextComponent = 1;
+        const s16 owner = sHdCourseBuilding[course];
+        u16 root;
+        u8 surface;
 
-        for (u32 course = 0; course < courseRows * courseCols; course++)
+        if (owner < 0)
+            continue;
+        root = HdFindBuildingRoot(owner);
+        if (!sHdBuildings[root].hasEntrance || sHdBuildings[root].isClipped)
+            continue;
+        if (sHdBuildings[root].componentId == 0)
         {
-            const s16 owner = sHdCourseBuilding[course];
-            u16 root;
-            u8 surface;
-
-            if (owner < 0)
+            if (nextComponent > HD2D_COMPONENT_MAX)
                 continue;
-            root = HdFindBuilding(owner);
-            if (!sHdBuildings[root].hasEntrance || sHdBuildings[root].truncated)
-                continue;
-            if (sHdBuildings[root].componentId == 0)
-            {
-                if (nextComponent > HD2D_COMPONENT_MAX)
-                    continue;
-                sHdBuildings[root].componentId = nextComponent++;
-            }
-            surface = sHdCourseBuildingKind[course] & HD_BUILDING_WALL
-                ? HD_SURFACE_WALL : HD_SURFACE_ROOF;
-            sHdCourseGeometry[course] = (sHdBuildings[root].componentId << HD2D_COMPONENT_SHIFT)
-                                      | surface;
-            sHdCourseGroundHeights[course] = sHdBuildings[root].base;
-            sHdCourseHeights[course] = surface == HD_SURFACE_ROOF
-                ? sHdBuildings[root].roofHeight : sHdBuildings[root].base;
+            sHdBuildings[root].componentId = nextComponent++;
         }
+        surface = sHdCourseBuildingKind[course] & HD_BUILDING_WALL
+            ? HD_SURFACE_WALL : HD_SURFACE_ROOF;
+        sHdCourseGeometry[course] = (sHdBuildings[root].componentId << HD2D_COMPONENT_SHIFT)
+                                  | surface;
+        sHdCourseGroundHeights[course] = sHdBuildings[root].baseHeight;
+        sHdCourseHeights[course] = surface == HD_SURFACE_ROOF
+            ? sHdBuildings[root].roofHeight : sHdBuildings[root].baseHeight;
     }
+}
+
+static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
+                                         u32 renderSampleMinX, u32 renderSampleMinY,
+                                         u32 renderSampleMaxX, u32 renderSampleMaxY)
+{
+    const u32 courseCols = sampleCols * 2;
+    const u32 courseRows = sampleRows * 2;
+    const struct HdBuildingBounds bounds = {
+        renderSampleMinX * 2,
+        renderSampleMinY * 2,
+        renderSampleMaxX * 2,
+        renderSampleMaxY * 2,
+    };
+
+    if (gMapHeader.mapType == MAP_TYPE_INDOOR
+     || gMapHeader.mapType == MAP_TYPE_SECRET_BASE)
+        return;
+
+    HdCollectBuildingCandidates(sampleCols, sampleRows, &bounds);
+    HdPublishBuildingComponents(courseCols, courseRows);
 }
 
 static bool8 MapWorldPixel(s32 screenX, s32 screenY, s16 cameraOffsetX, s16 cameraOffsetY,
