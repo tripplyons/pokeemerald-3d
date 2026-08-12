@@ -1556,13 +1556,11 @@ static bool8 HdMapSampleIsDirectTerrainCourse(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
 
-    // Native map data names the elevated surface directly. Covered rows below
-    // it are authored vertical face/corner art for the 2D compositor; extending
-    // the mountain marker through those rows turns each face into another
-    // horizontal 16x16 slab. Keep elevation on explicit semantic terrain and
-    // let the browser mesh construct the drop at its perimeter.
-    return MetatileBehavior_IsMountain(behavior)
-        || (behavior == MB_CAVE && sHdMapSamples[index].collision);
+    // MB_MOUNTAIN_TOP is a wild-battle environment tag, not a height contract.
+    // Treating it as a 24px plateau turns crater lips and coastal cities into
+    // dirt walls. Elevation comes from authored cliff sheets; blocked cave
+    // tiles remain the only native cap.
+    return behavior == MB_CAVE && sHdMapSamples[index].collision;
 }
 
 static bool8 HdMapSampleIsTerrainCapCourse(u32 index, u32 sampleX,
@@ -2035,6 +2033,7 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
             u32 count = 0;
             u16 component[HD2D_SAMPLE_COLS * 8];
             bool8 touchesTerrain = FALSE;
+            bool8 touchesMountain = FALSE;
             bool8 touchesWater = FALSE;
             s8 height;
             u16 faceReceiver;
@@ -2092,6 +2091,9 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                         surface = sHdSampleBaseSurfaces[ny * sampleCols + nx];
                         if (surface == HD_SURFACE_TERRAIN)
                             touchesTerrain = TRUE;
+                        if (MetatileBehavior_IsMountain(UNPACK_BEHAVIOR(
+                                sHdMapAttributes[ny * sampleCols + nx])))
+                            touchesMountain = TRUE;
                         if (surface == HD_SURFACE_WATER)
                             touchesWater = TRUE;
                     }
@@ -2104,9 +2106,9 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
             }
             // Collision is not height. A depth-2 sheet with walkable ground in
             // front matches both cave mouths and building bases; only the
-            // mouths sit on a mountain cap. Deeper waterfront sheets can still
-            // use water as the drop.
-            if (!touchesTerrain && !(depth >= 3 && touchesWater))
+            // mouths sit on mountain-tagged ground. The tag is context, not
+            // elevation. Deeper waterfront sheets can still use water as the drop.
+            if (!touchesTerrain && !touchesMountain && !(depth >= 3 && touchesWater))
             {
                 x = end + 1;
                 continue;
