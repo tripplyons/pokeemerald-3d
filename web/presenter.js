@@ -1175,11 +1175,23 @@ class WebGpuPresenter {
             }
           }
         }
+        let topV0 = textureV(ty);
+        let topV1 = textureV(ty + depth);
+        // Cliff sheets keep their authored face rows on the vertical drop.
+        // Sampling those same rows across the plateau top reprints the wall
+        // as horizontal stripes.
+        if (surfaceAt(tx, ty) === HD2D_SURFACE_TERRAIN) {
+          let capY = ty;
+          while (capY > 0 && surfaceAt(tx, capY - 1) === HD2D_SURFACE_TERRAIN
+              && heightAt(tx, capY - 1) === height) capY--;
+          topV0 = textureV(capY);
+          topV1 = textureV(capY + 1);
+        }
         quad(
-          [worldX(tx), height, worldZ(ty), textureU(tx), textureV(ty)],
-          [worldX(tx + width), height, worldZ(ty), textureU(tx + width), textureV(ty)],
-          [worldX(tx + width), height, worldZ(ty + depth), textureU(tx + width), textureV(ty + depth)],
-          [worldX(tx), height, worldZ(ty + depth), textureU(tx), textureV(ty + depth)],
+          [worldX(tx), height, worldZ(ty), textureU(tx), topV0],
+          [worldX(tx + width), height, worldZ(ty), textureU(tx + width), topV0],
+          [worldX(tx + width), height, worldZ(ty + depth), textureU(tx + width), topV1],
+          [worldX(tx), height, worldZ(ty + depth), textureU(tx), topV1],
           [0, 1, 0], surfaceAt(tx, ty), shell ? 1 : 0, shell ? groundHeights[start] : 0,
         );
       }

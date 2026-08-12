@@ -1909,27 +1909,22 @@ static bool8 HdMapSampleIsCliffSeed(u32 index)
         && HdMetatileCoverage(&sHdMapSamples[index], 1) == 0;
 }
 
-static bool8 HdMapSampleIsCliffJoin(u32 index)
+static bool8 HdMapSampleIsCliffFrame(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
 
-    if (!HdMapSampleIsCliffSeed(index))
-    {
-        if (!sHdMapSamples[index].valid || !sHdMapSamples[index].collision)
-            return FALSE;
-        if (!HdMapSampleIsStructuralMaterial(index) || !HdMapSampleIsCliffBandSurface(index))
-            return FALSE;
-        if (HdMapSampleIsDoorCourse(index) || sHdMapSamples[index].hasWarpEntrance)
-            return FALSE;
-        if (behavior != MB_NORMAL)
-            return FALSE;
-        // Rock frames around an opening use the top plane but belong to the
-        // same blocked cliff sheet as the plane-0 mouth.
-        if (HdMetatileCoverage(&sHdMapSamples[index], 0)
-          + HdMetatileCoverage(&sHdMapSamples[index], 1) == 0)
-            return FALSE;
-    }
-    return TRUE;
+    if (HdMapSampleIsCliffSeed(index))
+        return TRUE;
+    if (!sHdMapSamples[index].valid || !sHdMapSamples[index].collision)
+        return FALSE;
+    if (!HdMapSampleIsStructuralMaterial(index) || !HdMapSampleIsCliffBandSurface(index))
+        return FALSE;
+    if (HdMapSampleIsDoorCourse(index) || sHdMapSamples[index].hasWarpEntrance)
+        return FALSE;
+    if (behavior != MB_NORMAL)
+        return FALSE;
+    return HdMetatileCoverage(&sHdMapSamples[index], 0)
+         + HdMetatileCoverage(&sHdMapSamples[index], 1) != 0;
 }
 
 static void HdPublishCliffBandCell(u32 sampleX, u32 sampleY, u32 sampleCols,
@@ -1953,85 +1948,189 @@ static void HdPublishCliffBandCell(u32 sampleX, u32 sampleY, u32 sampleCols,
     }
 }
 
+static bool8 HdCliffRowRun(u32 sampleY, u32 sampleCols, u32 startX, u32 endX)
+{
+    u32 faceCells = 0;
+    u32 width = endX - startX + 1;
+
+    for (u32 x = startX; x <= endX; x++)
+    {
+        if (HdMapSampleIsCliffSeed(sampleY * sampleCols + x))
+            faceCells++;
+    }
+    return faceCells * 2 >= width;
+}
+
+static bool8 HdCliffBandHasWalkableSouth(u32 startX, u32 endX, u32 bottom,
+                                         u32 sampleCols, u32 sampleRows)
+{
+    if (bottom + 1 >= sampleRows)
+        return FALSE;
+    for (u32 x = startX; x <= endX; x++)
+    {
+        const u32 sample = (bottom + 1) * sampleCols + x;
+
+        if (sHdMapSamples[sample].valid
+         && !sHdMapSamples[sample].collision
+         && sHdSampleBaseSurfaces[sample] != HD_SURFACE_WATER
+         && sHdSampleBaseSurfaces[sample] != HD_SURFACE_TERRAIN)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                                      u32 courseCols)
 {
-    static u8 seen[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
-    static u16 component[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
-    static u16 queue[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
+    static u8 raised[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
     static const s8 offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
 
-    memset(seen, 0, sampleCols * sampleRows);
-    for (u32 seed = 0; seed < sampleCols * sampleRows; seed++)
+    memset(raised, 0, sampleCols * sampleRows);
+    // Grow overlapping horizontal runs, not 4-connected blobs. A 1-tile
+    // hedge ring around a pond is one flood-fill component and becomes a
+    // tower; a cliff sheet is a stack of wide overlapping rows.
+    for (u32 y = 0; y < sampleRows; y++)
     {
-        u32 queueStart = 0;
-        u32 queueEnd = 0;
-        u32 count = 0;
-        u32 minX = sampleCols;
-        u32 maxX = 0;
-        u32 minY = sampleRows;
-        u32 maxY = 0;
-        s8 height;
-        u16 faceReceiver;
-        u32 faceCourses;
-        u32 heightCourses;
-
-        if (seen[seed] || !HdMapSampleIsCliffSeed(seed))
-            continue;
-        seen[seed] = 1;
-        queue[queueEnd++] = seed;
-        while (queueStart < queueEnd)
+        for (u32 x = 0; x < sampleCols;)
         {
-            const u32 sample = queue[queueStart++];
-            const u32 sampleX = sample % sampleCols;
-            const u32 sampleY = sample / sampleCols;
+            u32 start;
+            u32 end;
+            u32 top;
+            u32 bottom;
+            u32 width;
+            u32 depth;
+            u32 count = 0;
+            u16 component[HD2D_SAMPLE_COLS * 8];
+            bool8 touchesTerrain = FALSE;
+            bool8 touchesWater = FALSE;
+            s8 height;
+            u16 faceReceiver;
+            u32 faceCourses;
+            u32 heightCourses;
 
-            component[count++] = sample;
-            if (sampleX < minX) minX = sampleX;
-            if (sampleX > maxX) maxX = sampleX;
-            if (sampleY < minY) minY = sampleY;
-            if (sampleY > maxY) maxY = sampleY;
-            for (u32 i = 0; i < ARRAY_COUNT(offsets); i++)
+            if (raised[y * sampleCols + x] || !HdMapSampleIsCliffSeed(y * sampleCols + x))
             {
-                const s32 nx = (s32)sampleX + offsets[i][0];
-                const s32 ny = (s32)sampleY + offsets[i][1];
-                u32 next;
-
-                if (nx < 0 || ny < 0
-                 || nx >= (s32)sampleCols || ny >= (s32)sampleRows)
-                    continue;
-                next = ny * sampleCols + nx;
-                if (seen[next] || !HdMapSampleIsCliffJoin(next))
-                    continue;
-                seen[next] = 1;
-                queue[queueEnd++] = next;
+                x++;
+                continue;
             }
-        }
-        if (count < HD2D_CLIFF_BAND_MIN_SHORT_WIDTH)
-            continue;
-        if ((maxX - minX + 1) < HD2D_CLIFF_BAND_MIN_WIDTH
-         && (maxY - minY + 1) < 2)
-            continue;
-        height = (s8)((maxY - minY + 1) * 16);
-        if (height > HD2D_CLIFF_BAND_MAX_HEIGHT)
-            height = HD2D_CLIFF_BAND_MAX_HEIGHT;
-        faceCourses = (maxY - minY + 1) * 2;
-        heightCourses = (u32)height / HD2D_COURSE_HEIGHT;
-        if (faceCourses > HD2D_RECEIVER_OFFSET_MASK)
-            faceCourses = HD2D_RECEIVER_OFFSET_MASK;
-        if (faceCourses > heightCourses)
-            faceCourses = heightCourses;
-        faceReceiver = HD2D_RECEIVER_TERRAIN_FACE
-            | HD2D_RECEIVER_TERRAIN_FACE_SELF
-            | (faceCourses & HD2D_RECEIVER_OFFSET_MASK);
-        for (u32 i = 0; i < count; i++)
-        {
-            const u32 sample = component[i];
-            const u32 sampleX = sample % sampleCols;
-            const u32 sampleY = sample / sampleCols;
+            start = x;
+            end = x;
+            while (end + 1 < sampleCols
+                && !raised[y * sampleCols + end + 1]
+                && HdMapSampleIsCliffSeed(y * sampleCols + end + 1))
+                end++;
+            width = end - start + 1;
+            if (width < HD2D_CLIFF_BAND_MIN_SHORT_WIDTH)
+            {
+                x = end + 1;
+                continue;
+            }
+            top = y;
+            bottom = y;
+            while (top > 0 && HdCliffRowRun(top - 1, sampleCols, start, end))
+                top--;
+            while (bottom + 1 < sampleRows && HdCliffRowRun(bottom + 1, sampleCols, start, end))
+                bottom++;
+            depth = bottom - top + 1;
+            if (depth < 2)
+            {
+                x = end + 1;
+                continue;
+            }
+            for (u32 bandY = top; bandY <= bottom; bandY++)
+            {
+                for (u32 bandX = start; bandX <= end; bandX++)
+                {
+                    const u32 sample = bandY * sampleCols + bandX;
 
-            HdPublishCliffBandCell(sampleX, sampleY, sampleCols, courseCols,
-                                   height, sampleY == maxY ? faceReceiver : 0);
+                    if (!HdMapSampleIsCliffSeed(sample) || raised[sample])
+                        continue;
+                    if (count < ARRAY_COUNT(component))
+                        component[count++] = sample;
+                    for (u32 d = 0; d < ARRAY_COUNT(offsets); d++)
+                    {
+                        const s32 nx = (s32)bandX + offsets[d][0];
+                        const s32 ny = (s32)bandY + offsets[d][1];
+                        u8 surface;
+
+                        if (nx < 0 || ny < 0
+                         || nx >= (s32)sampleCols || ny >= (s32)sampleRows)
+                            continue;
+                        surface = sHdSampleBaseSurfaces[ny * sampleCols + nx];
+                        if (surface == HD_SURFACE_TERRAIN)
+                            touchesTerrain = TRUE;
+                        if (surface == HD_SURFACE_WATER)
+                            touchesWater = TRUE;
+                    }
+                }
+            }
+            if (count < HD2D_CLIFF_BAND_MIN_SHORT_WIDTH)
+            {
+                x = end + 1;
+                continue;
+            }
+            // Depth-2 inland mouths (cave arches) have walkable ground in
+            // front. Depth-2 pond hedges do not. Deeper waterfront sheets
+            // sit on water or a mountain cap.
+            if (!touchesTerrain && !touchesWater
+             && !(depth == 2 && width >= 6
+                  && HdCliffBandHasWalkableSouth(start, end, bottom, sampleCols, sampleRows)))
+            {
+                x = end + 1;
+                continue;
+            }
+            if (depth == 2 && !touchesTerrain && !HdCliffBandHasWalkableSouth(start, end, bottom,
+                                                                             sampleCols, sampleRows)
+             && width > 16)
+            {
+                x = end + 1;
+                continue;
+            }
+            height = (s8)(depth * 16);
+            if (height > HD2D_CLIFF_BAND_MAX_HEIGHT)
+                height = HD2D_CLIFF_BAND_MAX_HEIGHT;
+            faceCourses = depth * 2;
+            heightCourses = (u32)height / HD2D_COURSE_HEIGHT;
+            if (faceCourses > HD2D_RECEIVER_OFFSET_MASK)
+                faceCourses = HD2D_RECEIVER_OFFSET_MASK;
+            if (faceCourses > heightCourses)
+                faceCourses = heightCourses;
+            faceReceiver = HD2D_RECEIVER_TERRAIN_FACE
+                | HD2D_RECEIVER_TERRAIN_FACE_SELF
+                | (faceCourses & HD2D_RECEIVER_OFFSET_MASK);
+            for (u32 i = 0; i < count; i++)
+            {
+                const u32 sample = component[i];
+                const u32 sampleX = sample % sampleCols;
+                const u32 sampleY = sample / sampleCols;
+
+                raised[sample] = 1;
+                HdPublishCliffBandCell(sampleX, sampleY, sampleCols, courseCols,
+                                       height, sampleY == bottom ? faceReceiver : 0);
+            }
+            for (u32 i = 0; i < count; i++)
+            {
+                const u32 sampleX = component[i] % sampleCols;
+                const u32 sampleY = component[i] / sampleCols;
+
+                for (u32 d = 0; d < ARRAY_COUNT(offsets); d++)
+                {
+                    const s32 nx = (s32)sampleX + offsets[d][0];
+                    const s32 ny = (s32)sampleY + offsets[d][1];
+                    u32 next;
+
+                    if (nx < 0 || ny < 0
+                     || nx >= (s32)sampleCols || ny >= (s32)sampleRows)
+                        continue;
+                    next = ny * sampleCols + nx;
+                    if (raised[next] || !HdMapSampleIsCliffFrame(next))
+                        continue;
+                    raised[next] = 1;
+                    HdPublishCliffBandCell(nx, ny, sampleCols, courseCols,
+                                           height, ny == (s32)bottom ? faceReceiver : 0);
+                }
+            }
+            x = end + 1;
         }
     }
 }
