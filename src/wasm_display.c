@@ -1498,34 +1498,23 @@ static bool8 HdMapSampleIsFloorSurface(u32 index, u32 sampleCols, u32 sampleRows
         || HdMapSampleMatchesWalkableFront(index, sampleCols, sampleRows);
 }
 
-static bool8 HdCourseIsRoofCandidate(u32 courseX, u32 courseY, u32 sampleCols,
-                                     u32 sampleRows)
+static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
+                               u32 sampleRows)
 {
     const u32 sampleX = courseX / 2;
     const u32 sampleY = courseY / 2;
     const u32 sample = sampleY * sampleCols + sampleX;
 
-    // A roof cap may use normal-layer art one sample above its covered/door
-    // facade. Keep that authored relationship, rather than allowing any top
-    // art to seed a building component; collision also excludes walkable
-    // paths that happen to use covered-layer art.
+    // Landmark roofs are collision top-art sheets, not only the one row
+    // sitting on a COVERED/door tile. Door and covered courses stay facade.
     if (!HdCourseHasTopArt(courseX, courseY, sampleCols)
      || !sHdMapSamples[sample].collision
      || !HdMapSampleIsStructuralMaterial(sample)
-     || HdMapSampleIsFloorSurface(sample, sampleCols, sampleRows))
+     || HdMapSampleIsFloorSurface(sample, sampleCols, sampleRows)
+     || HdMapSampleIsDoorCourse(sample)
+     || HdMapSampleIsCoveredCourse(sample))
         return FALSE;
-    if (HdMapSampleIsDoorCourse(sample) || HdMapSampleIsCoveredCourse(sample))
-        return TRUE;
-    if (sampleY + 1 < sampleRows)
-    {
-        const u32 below = (sampleY + 1) * sampleCols + sampleX;
-
-        if (sHdMapSamples[below].valid
-         && HdMapSampleIsStructuralMaterial(below)
-         && (HdMapSampleIsDoorCourse(below) || HdMapSampleIsCoveredCourse(below)))
-            return TRUE;
-    }
-    return FALSE;
+    return TRUE;
 }
 
 static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
@@ -1572,6 +1561,22 @@ static bool8 HdMapSampleIsFacadeStackCourse(u32 index, u32 sampleCols, u32 sampl
         && HdMapSampleHasTopArt(index)
         && HdMapSampleIsStructuralMaterial(index)
         && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows);
+}
+
+static bool8 HdMapRowIsRoofOverhang(u32 row, u32 startX, u32 endX,
+                                    u32 sampleCols, u32 sampleRows)
+{
+    // A roof sheet continues past the door span. House gables stay the
+    // same width as the facade, so they remain stacked wall art.
+    if (startX > 0
+     && HdMapSampleIsFacadeStackCourse(row * sampleCols + startX - 1,
+                                       sampleCols, sampleRows))
+        return TRUE;
+    if (endX + 1 < sampleCols
+     && HdMapSampleIsFacadeStackCourse(row * sampleCols + endX + 1,
+                                       sampleCols, sampleRows))
+        return TRUE;
+    return FALSE;
 }
 
 static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
@@ -2071,7 +2076,6 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
             u32 count = 0;
             u16 component[HD2D_SAMPLE_COLS * 8];
             bool8 touchesTerrain = FALSE;
-            bool8 touchesMountain = FALSE;
             s8 height;
             u16 faceReceiver;
             u32 faceCourses;
@@ -2128,9 +2132,6 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                         surface = sHdSampleBaseSurfaces[ny * sampleCols + nx];
                         if (surface == HD_SURFACE_TERRAIN)
                             touchesTerrain = TRUE;
-                        if (MetatileBehavior_IsMountain(UNPACK_BEHAVIOR(
-                                sHdMapAttributes[ny * sampleCols + nx])))
-                            touchesMountain = TRUE;
                     }
                 }
             }
@@ -2140,10 +2141,11 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                 continue;
             }
             // Collision is not height. A sheet with walkable ground in front
-            // matches cave mouths, building bases, and plaza curbs. Only the
-            // mouths sit on mountain-tagged ground or an existing cap. Water
-            // is a drop, not proof of a cliff.
-            if (!touchesTerrain && !touchesMountain)
+            // matches cave mouths, building bases, and plaza curbs. Only an
+            // existing terrain cap (cave / authored cliff) proves a cliff.
+            // MB_MOUNTAIN_TOP is a wild-battle tag, not a raise license, and
+            // water is a drop, not proof of a cliff.
+            if (!touchesTerrain)
             {
                 x = end + 1;
                 continue;
@@ -2328,6 +2330,10 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
 {
     const u32 minY = seedY > HD2D_GEOMETRY_RADIUS * 2
         ? seedY - HD2D_GEOMETRY_RADIUS * 2 : 0;
+    const u32 minX = spanStart > HD2D_GEOMETRY_RADIUS * 2
+        ? spanStart - HD2D_GEOMETRY_RADIUS * 2 : 0;
+    const u32 maxX = spanEnd + HD2D_GEOMETRY_RADIUS * 2 < courseCols
+        ? spanEnd + HD2D_GEOMETRY_RADIUS * 2 : courseCols;
     const u16 visit = building + 1;
     u32 queueStart = 0;
     u32 queueEnd = 0;
@@ -2336,7 +2342,7 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
     {
         const u32 course = seedY * courseCols + courseX;
 
-        if (!HdCourseIsRoofCandidate(courseX, seedY, sampleCols, sampleRows))
+        if (!HdCourseIsRoofArt(courseX, seedY, sampleCols, sampleRows))
             continue;
         sHdCourseVisit[course] = visit;
         sHdCourseQueue[queueEnd++] = course;
@@ -2355,7 +2361,7 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
         if (courseY == minY)
         {
             if (courseY > 0
-             && HdCourseIsRoofCandidate(courseX, courseY - 1, sampleCols, sampleRows))
+             && HdCourseIsRoofArt(courseX, courseY - 1, sampleCols, sampleRows))
                 sHdBuildings[building].isClipped = TRUE;
             continue;
         }
@@ -2363,12 +2369,12 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
         {
             u32 next;
 
-            if (nextX[direction] < (s32)spanStart || nextX[direction] >= (s32)spanEnd
+            if (nextX[direction] < (s32)minX || nextX[direction] >= (s32)maxX
              || nextY[direction] < (s32)minY || nextY[direction] > (s32)seedY)
                 continue;
             next = nextY[direction] * courseCols + nextX[direction];
             if (sHdCourseVisit[next] == visit
-             || !HdCourseIsRoofCandidate(nextX[direction], nextY[direction], sampleCols, sampleRows))
+             || !HdCourseIsRoofArt(nextX[direction], nextY[direction], sampleCols, sampleRows))
                 continue;
             sHdCourseVisit[next] = visit;
             sHdCourseQueue[queueEnd++] = next;
@@ -2426,7 +2432,8 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
 
             wallTop = y;
             while (wallTop > 1 && y - wallTop < HD2D_GEOMETRY_RADIUS
-                && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows))
+                && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows)
+                && !HdMapRowIsRoofOverhang(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows))
                 wallTop--;
             // Wall ownership includes the COVERED/door row and any stacked
             // house courses above it. A distinct roof cap, if present, stays

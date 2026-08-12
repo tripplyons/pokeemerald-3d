@@ -1127,19 +1127,18 @@ class WebGpuPresenter {
         if (visited[start]) continue;
         visited[start] = 1;
         if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL) {
+          // Wall courses occupy the building footprint. Fill every one with
+          // the first authored ground south of this column so the shell is
+          // opaque. Reusing that one front course avoids reprinting each
+          // facade row as a second floor.
           let sourceY = ty + 1;
-          while (sourceY < rows && surfaceAt(tx, sourceY) === HD2D_SURFACE_WALL
-              && componentAt(tx, sourceY) === componentAt(tx, ty)) sourceY++;
-          if (sourceY !== ty + 1) continue;
-          while (sourceY + 1 < rows
+          while (sourceY < rows
               && (surfaceAt(tx, sourceY) === HD2D_SURFACE_WALL
-               || surfaceAt(tx, sourceY) === HD2D_SURFACE_ROOF)) sourceY++;
+               || surfaceAt(tx, sourceY) === HD2D_SURFACE_ROOF)
+              && (surfaceAt(tx, sourceY) !== HD2D_SURFACE_WALL
+               || componentAt(tx, sourceY) === componentAt(tx, ty))) sourceY++;
           sourceY = Math.min(rows - 1, sourceY);
           const ground = groundHeights[start];
-          // Replace only the front-most removed wall footprint with authored
-          // ground in front. Interior wall courses remain vertical facade
-          // source only; drawing each one horizontally repeats the same
-          // authored contact-shadow/debris course behind the building.
           quad(
             [worldX(tx),ground,worldZ(ty),textureU(tx),textureV(sourceY)],
             [worldX(tx + 1),ground,worldZ(ty),textureU(tx + 1),textureV(sourceY)],

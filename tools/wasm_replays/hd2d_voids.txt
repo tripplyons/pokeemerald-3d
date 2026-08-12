@@ -1,0 +1,52 @@
+# Flat landmark roof, building footprint voids, harbor stretch, Frontier dirt volumes.
+
+# Lilycove Department Store: large orange roof that stays painted on the plaza.
+120 warp 0 5 27 10
+320 screenshot lilycove-dept
+320 probe hd2d-courses 18
+320 probe height-map
+321 view classic
+331 screenshot lilycove-dept-classic
+332 view hd2d
+
+# Lilycove Pokemon Center / plaza buildings.
+333 warp 0 5 24 16
+533 screenshot lilycove-pc
+533 probe hd2d-courses 18
+533 probe height-map
+534 view classic
+544 screenshot lilycove-pc-classic
+545 view hd2d
+
+# Lilycove harbor waterfront.
+546 warp 0 5 12 28
+746 screenshot lilycove-harbor
+746 probe hd2d-courses 18
+746 probe height-map
+747 view classic
+757 screenshot lilycove-harbor-classic
+758 view hd2d
+
+# Battle Frontier East arena / dirt volumes.
+759 warp 26 14 39 32
+959 screenshot frontier-arena
+959 probe hd2d-courses 18
+959 probe height-map
+960 view classic
+970 screenshot frontier-arena-classic
+971 view hd2d
+
+# Battle Frontier East Pokemon Center / MART-style plaza voids.
+972 warp 26 14 3 54
+1172 screenshot frontier-pc
+1172 probe hd2d-courses 18
+1172 probe height-map
+1173 view classic
+1183 screenshot frontier-pc-classic
+1184 view hd2d
+
+# Battle Frontier East exchange / waterfront stretch.
+1185 warp 26 14 10 32
+1385 screenshot frontier-exchange
+1385 probe hd2d-courses 18
+1385 probe height-map
