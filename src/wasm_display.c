@@ -1476,6 +1476,28 @@ static bool8 HdCourseHasTopArt(u32 courseX, u32 courseY, u32 sampleCols)
         && HdMetatileQuadrantCoverage(&sHdMapSamples[sample], 1, quadrant) != 0;
 }
 
+static bool8 HdMapSampleIsWalkableFloorArt(u32 index);
+
+static bool8 HdMapSampleMatchesWalkableFront(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    const u32 front = index + sampleCols;
+
+    if (index + sampleCols >= sampleCols * sampleRows)
+        return FALSE;
+    if (!sHdMapSamples[front].valid || sHdMapSamples[front].collision)
+        return FALSE;
+    return HdMetatilesHaveSameVisibleArt(&sHdMapSamples[index], &sHdMapSamples[front]);
+}
+
+static bool8 HdMapSampleIsFloorSurface(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    // Walkable floor art is a floor even when a collision copy sits inside a
+    // building footprint or a covered porch uses the same painting as the
+    // deck in front.
+    return HdMapSampleIsWalkableFloorArt(index)
+        || HdMapSampleMatchesWalkableFront(index, sampleCols, sampleRows);
+}
+
 static bool8 HdCourseIsRoofCandidate(u32 courseX, u32 courseY, u32 sampleCols,
                                      u32 sampleRows)
 {
@@ -1489,7 +1511,8 @@ static bool8 HdCourseIsRoofCandidate(u32 courseX, u32 courseY, u32 sampleCols,
     // paths that happen to use covered-layer art.
     if (!HdCourseHasTopArt(courseX, courseY, sampleCols)
      || !sHdMapSamples[sample].collision
-     || !HdMapSampleIsStructuralMaterial(sample))
+     || !HdMapSampleIsStructuralMaterial(sample)
+     || HdMapSampleIsFloorSurface(sample, sampleCols, sampleRows))
         return FALSE;
     if (HdMapSampleIsDoorCourse(sample) || HdMapSampleIsCoveredCourse(sample))
         return TRUE;
@@ -1527,7 +1550,8 @@ static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRo
         // Walkable mountain caps sit in front of cave warps and other
         // terrain mouths. That is not building-facade support.
         && sHdSampleBaseSurfaces[index + sampleCols] != HD_SURFACE_TERRAIN
-        && sHdSampleBaseSurfaces[index + sampleCols] != HD_SURFACE_WATER;
+        && sHdSampleBaseSurfaces[index + sampleCols] != HD_SURFACE_WATER
+        && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows);
 }
 
 static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols, u32 sampleRows)
@@ -1539,6 +1563,17 @@ static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols, u32 sampl
          || sHdMapSamples[index].hasWarpEntrance);
 }
 
+static bool8 HdMapSampleIsFacadeStackCourse(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    // Rows above a door are often normal-layer house art (windows, gable),
+    // not COVERED. They are more of the same 2D facade stack, not obstacles.
+    return sHdMapSamples[index].valid
+        && sHdMapSamples[index].collision
+        && HdMapSampleHasTopArt(index)
+        && HdMapSampleIsStructuralMaterial(index)
+        && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows);
+}
+
 static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
                                      u32 sampleCols, u32 sampleRows)
 {
@@ -1546,8 +1581,11 @@ static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
     {
         const u32 index = row * sampleCols + x;
 
-        if (!HdMapSampleHasFacadeSupport(index, sampleCols, sampleRows))
-            return FALSE;
+        if (HdMapSampleHasFacadeSupport(index, sampleCols, sampleRows))
+            continue;
+        if (HdMapSampleIsFacadeStackCourse(index, sampleCols, sampleRows))
+            continue;
+        return FALSE;
     }
     return TRUE;
 }
@@ -2393,11 +2431,9 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             while (wallTop > 1 && y - wallTop < HD2D_GEOMETRY_RADIUS
                 && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows))
                 wallTop--;
-            // Wall ownership starts at the first supported facade metatile
-            // itself. The row directly above may contain authored roof/cap
-            // art used to seed the roof flood, but claiming its lower 8px as
-            // facade inflates every building by one course and turns roof
-            // padding/transparent pixels into a detached dark wall band.
+            // Wall ownership includes the COVERED/door row and any stacked
+            // house courses above it. A distinct roof cap, if present, stays
+            // on the row above wallTop and seeds the roof flood.
             wallStartCourse = wallTop * 2;
             wallEndCourse = y * 2 + 2;
             spanStartCourse = spanStart * 2;
