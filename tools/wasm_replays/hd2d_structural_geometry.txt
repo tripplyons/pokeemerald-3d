@@ -1,0 +1,66 @@
+# Focused building and terrain regression coverage. The Battle Frontier frames
+# reproduce the supplied screenshot's boxy building caps and raised decorative
+# slabs; the remaining maps exercise distinct authored cliffs and elevations.
+120 warp 26 14 3 54
+320 screenshot frontier-buildings-and-cliffs
+320 probe hd2d-courses 20
+320 probe world-atlas
+320 probe height-map
+
+321 warp 26 14 30 48
+521 screenshot frontier-building-and-planter
+
+522 warp 0 4 22 14
+722 screenshot fortree-building-masses
+
+723 warp 0 7 31 35
+923 screenshot sootopolis-terrain
+
+924 warp 0 34 20 70
+1124 screenshot route119-terrain
+
+1125 warp 24 12 20 30
+1325 screenshot mt-chimney-terrain
+
+# Landmark buildings exercise stepped and multi-wing facade ownership. The
+# Battle Dome checkpoint also covers the authored cliff corners visible beside
+# its entrance in the supplied examples.
+1326 warp 26 4 19 17
+1526 screenshot frontier-battle-dome-and-cliffs
+
+1527 warp 26 4 42 27
+1727 screenshot frontier-battle-pike
+
+1728 warp 26 14 39 29
+1928 screenshot frontier-battle-arena
+
+1929 warp 26 14 58 14
+2129 screenshot frontier-battle-pyramid
+
+2130 warp 26 14 45 56
+2330 screenshot frontier-battle-palace
+
+2331 warp 26 4 11 38
+2531 screenshot frontier-battle-factory-and-cliffs
+2531 probe hd2d-courses 20
+2531 probe world-atlas
+2531 probe height-map
+
+2532 warp 26 4 51 51
+2732 screenshot frontier-west-services-and-cliffs
+2732 probe hd2d-courses 20
+2733 probe world-atlas
+2734 probe height-map
+2735 view classic
+2745 screenshot frontier-west-services-classic-reference
+
+# The Artisan Cave entrance is authored into a cliff face. It must remain
+# terrain instead of being promoted to a freestanding building shell.
+2746 view hd2d
+2747 warp 26 4 39 55
+2947 screenshot frontier-artisan-cave-cliff
+2947 probe hd2d-courses 20
+2947 probe world-atlas
+2947 probe height-map
+2948 view classic
+2958 screenshot frontier-artisan-cave-classic-reference

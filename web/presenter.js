@@ -1,4 +1,5 @@
 const HD2D_SURFACE_BITS = 3;
+const HD2D_SURFACE_GROUND = 0;
 export const HD2D_SURFACE_WATER = 1;
 export const HD2D_SURFACE_DECK = 2;
 export const HD2D_SURFACE_TERRAIN = 3;
@@ -221,7 +222,6 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 const TO_KEY = normalize(vec3f(-0.45, 0.77, -0.45));
 const SURFACE_WATER = 1u;
 const MATERIAL_NEUTRAL_BUILDING = 8u;
-const MATERIAL_NEUTRAL_ROOF = 9u;
 
 fn structuralVisibility(position: vec3f, normal: vec3f) -> f32 {
   if (any(position.xy <= vec2f(0.001)) || any(position.xy >= vec2f(0.999))
@@ -252,22 +252,14 @@ struct FragmentOutput {
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   var base: vec3f;
-  if (input.material == MATERIAL_NEUTRAL_BUILDING || input.material == MATERIAL_NEUTRAL_ROOF) {
+  if (input.material == MATERIAL_NEUTRAL_BUILDING) {
     // Unauthored closure geometry uses a component-derived material. Do not
     // sample arbitrary atlas pixels that can contain paths, doors, or logos.
     base = input.neutralColor;
-    if (input.material == MATERIAL_NEUTRAL_ROOF) {
-      // Roof bands are anchored in world tile units, so they stay attached to
-      // structures during subtile movement instead of swimming in screen space.
-      let panel = min(fract(input.worldPosition.x / 8.0), fract(input.worldPosition.z / 8.0));
-      let seam = 1.0 - smoothstep(0.035, 0.105, panel);
-      base *= 1.0 - seam * 0.07;
-    } else {
-      let course = max(0.0, (input.worldPosition.y - input.structureBase) / 8.0);
-      let seam = 1.0 - smoothstep(0.025, 0.095, fract(course));
-      let tone = select(0.99, 1.01, fract(floor(course) * 0.5) >= 0.5);
-      base *= tone * (1.0 - seam * 0.07);
-    }
+    let course = max(0.0, (input.worldPosition.y - input.structureBase) / 8.0);
+    let seam = 1.0 - smoothstep(0.025, 0.095, fract(course));
+    let tone = select(0.99, 1.01, fract(floor(course) * 0.5) >= 0.5);
+    base *= tone * (1.0 - seam * 0.07);
   } else {
     base = textureSampleLevel(worldTexture, pixelSampler, input.uv, 0.0).rgb;
   }
@@ -972,7 +964,6 @@ class WebGpuPresenter {
     const pixelU = (pixel) => (Math.max(0, Math.min(this.worldWidth - 1, pixel)) + 0.5) / this.worldWidth;
     const pixelV = (pixel) => (Math.max(0, Math.min(this.worldHeight - 1, pixel)) + 0.5) / this.worldHeight;
     const MATERIAL_NEUTRAL_BUILDING = 8;
-    const MATERIAL_NEUTRAL_ROOF = 9;
 
     const openDeckReceiver = (tx, ty) => {
       const word = receiverAt(tx, ty);
@@ -1036,50 +1027,68 @@ class WebGpuPresenter {
       }
     };
 
-    // Ordinary terrain sides are the skirt of the elevated authored surface,
-    // not a stack of unrelated neighboring map tiles. Sampling the top tile's
-    // exposed edge continuously prevents pavement, water, or flowerbed pixels
-    // below a ledge from becoming horizontal bands on its vertical face.
-    const terrainSkirt = (tx, ty, bottom, height, dx, dy, normal, material) => {
+    // Terrain tops are laid out after their vertical face art in the native 2D
+    // map. Walk inward across the semantic top, then consume the authored rows
+    // beyond its opposite boundary from top to bottom. This turns cliff-face
+    // courses into one vertical wall instead of either laying them flat or
+    // stretching the top surface's edge pixel over the whole drop.
+    const terrainSide = (tx, ty, bottom, height, dx, dy, normal, material) => {
       if (bottom >= height) return;
-      let u0, u1, v0, v1;
-      if (dy > 0) {
-        u0 = textureU(tx); u1 = textureU(tx + 1);
-        v0 = v1 = pixelV(originY + ty * TILE_SIZE + TILE_SIZE - 1);
-      } else if (dy < 0) {
-        u0 = textureU(tx); u1 = textureU(tx + 1);
-        v0 = v1 = pixelV(originY + ty * TILE_SIZE);
-      } else if (dx > 0) {
-        u0 = u1 = pixelU(originX + tx * TILE_SIZE + TILE_SIZE - 1);
-        v0 = textureV(ty); v1 = textureV(ty + 1);
-      } else {
-        u0 = u1 = pixelU(originX + tx * TILE_SIZE);
-        v0 = textureV(ty); v1 = textureV(ty + 1);
+      let sourceX = tx;
+      let sourceY = ty;
+      while (inGrid(sourceX, sourceY - 1)
+          && surfaceAt(sourceX, sourceY - 1) === material
+          && heightAt(sourceX, sourceY - 1) === height) {
+        sourceY--;
       }
-      if (dy < 0) {
-        const z = worldZ(ty);
-        quad([worldX(tx + 1),bottom,z,u1,v1],
-             [worldX(tx),bottom,z,u0,v1],
-             [worldX(tx),height,z,u0,v0],
-             [worldX(tx + 1),height,z,u1,v0], normal, material);
-      } else if (dy > 0) {
-        const z = worldZ(ty + 1);
-        quad([worldX(tx),bottom,z,u0,v0],
-             [worldX(tx + 1),bottom,z,u1,v0],
-             [worldX(tx + 1),height,z,u1,v1],
-             [worldX(tx),height,z,u0,v1], normal, material);
-      } else if (dx < 0) {
-        const x = worldX(tx);
-        quad([x,bottom,worldZ(ty),u1,v0],
-             [x,bottom,worldZ(ty + 1),u1,v1],
-             [x,height,worldZ(ty + 1),u0,v1],
-             [x,height,worldZ(ty),u0,v0], normal, material);
-      } else {
-        const x = worldX(tx + 1);
-        quad([x,bottom,worldZ(ty + 1),u0,v1],
-             [x,bottom,worldZ(ty),u0,v0],
-             [x,height,worldZ(ty),u1,v0],
-             [x,height,worldZ(ty + 1),u1,v1], normal, material);
+      sourceY--;
+      const sourceSurface = surfaceAt(sourceX, sourceY);
+      const sourceIsStructural = material === HD2D_SURFACE_TERRAIN && dy > 0
+        && inGrid(sourceX, sourceY)
+        && (sourceSurface === HD2D_SURFACE_GROUND
+          || sourceSurface === HD2D_SURFACE_OBSTACLE)
+        && heightAt(sourceX, sourceY) === 0;
+      for (let courseTop = height, course = 0; courseTop > bottom;
+           courseTop -= TILE_SIZE, course++) {
+        const courseBottom = Math.max(bottom, courseTop - TILE_SIZE);
+        const faceX = sourceX;
+        const faceY = sourceY - course;
+        let u0, u1, v0, v1;
+        if (sourceIsStructural && inGrid(faceX, faceY)) {
+          u0 = textureU(faceX); u1 = textureU(faceX + 1);
+          v0 = textureV(faceY); v1 = textureV(faceY + 1);
+        } else if (dy !== 0) {
+          u0 = textureU(tx); u1 = textureU(tx + 1);
+          v0 = v1 = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));
+        } else {
+          u0 = u1 = pixelU(originX + tx * TILE_SIZE + (dx > 0 ? TILE_SIZE - 1 : 0));
+          v0 = textureV(ty); v1 = textureV(ty + 1);
+        }
+        if (dy < 0) {
+          const z = worldZ(ty);
+          quad([worldX(tx + 1),courseBottom,z,u1,v1],
+               [worldX(tx),courseBottom,z,u0,v1],
+               [worldX(tx),courseTop,z,u0,v0],
+               [worldX(tx + 1),courseTop,z,u1,v0], normal, material);
+        } else if (dy > 0) {
+          const z = worldZ(ty + 1);
+          quad([worldX(tx),courseBottom,z,u0,v1],
+               [worldX(tx + 1),courseBottom,z,u1,v1],
+               [worldX(tx + 1),courseTop,z,u1,v0],
+               [worldX(tx),courseTop,z,u0,v0], normal, material);
+        } else if (dx < 0) {
+          const x = worldX(tx);
+          quad([x,courseBottom,worldZ(ty),u0,v1],
+               [x,courseBottom,worldZ(ty + 1),u1,v1],
+               [x,courseTop,worldZ(ty + 1),u1,v0],
+               [x,courseTop,worldZ(ty),u0,v0], normal, material);
+        } else {
+          const x = worldX(tx + 1);
+          quad([x,courseBottom,worldZ(ty + 1),u0,v1],
+               [x,courseBottom,worldZ(ty),u1,v1],
+               [x,courseTop,worldZ(ty),u1,v0],
+               [x,courseTop,worldZ(ty + 1),u0,v0], normal, material);
+        }
       }
     };
 
@@ -1222,10 +1231,11 @@ class WebGpuPresenter {
         if (!Number.isFinite(top)) top = component.base + depth * TILE_SIZE;
         const x0 = worldX(tx);
         const x1 = worldX(tx + width);
-        // The authored wall rectangle is vertical source art, so its physical
-        // south/front edge is after all of its 8px courses rather than at the
-        // rectangle's north edge.
-        const z = worldZ(ty + depth);
+        // The rectangle's Y range is vertical source art, not horizontal
+        // building depth. Place the projected facade after one roof-edge
+        // course; reusing `depth` here counts every wall row twice and turns a
+        // tall facade into an equally deep rectangular building.
+        const z = worldZ(ty + 1);
         const vTop = top - component.base >= depth * TILE_SIZE
           ? textureV(ty)
           : textureV(ty + depth - (top - component.base) / TILE_SIZE);
@@ -1238,10 +1248,8 @@ class WebGpuPresenter {
         );
         component.roofHeight = Math.max(component.roofHeight, top);
         component.wallRects.push([tx, ty, width, depth, top]);
-        for (let y = 0; y < depth; y++) {
-          for (let x = 0; x < width; x++)
-            component.wallCells.push([tx + x, ty + y, top]);
-        }
+        for (let x = 0; x < width; x++)
+          component.wallCells.push([tx + x, ty, top]);
       }
     }
 
@@ -1342,41 +1350,15 @@ class WebGpuPresenter {
       color = mixColor(color, roofColor, selected.luminance < 82 ? 0.22 : 0.12);
       return liftColorToLuminance(color, 0.30);
     };
-    const tileAverageColor = (tx, ty, fallback) => {
-      const x0 = Math.max(0, Math.min(this.worldWidth - 1, originX + tx * TILE_SIZE));
-      const y0 = Math.max(0, Math.min(this.worldHeight - 1, originY + ty * TILE_SIZE));
-      const x1 = Math.min(this.worldWidth, x0 + TILE_SIZE);
-      const y1 = Math.min(this.worldHeight, y0 + TILE_SIZE);
-      let count = 0;
-      let red = 0;
-      let green = 0;
-      let blue = 0;
-      for (let py = y0; py < y1; py++) {
-        for (let px = x0; px < x1; px++) {
-          const offset = (py * this.worldWidth + px) * 4;
-          if (worldPixels[offset + 3] < 128) continue;
-          red += worldPixels[offset];
-          green += worldPixels[offset + 1];
-          blue += worldPixels[offset + 2];
-          count++;
-        }
-      }
-      if (!count) return fallback;
-      return [red / count / 255, green / count / 255, blue / count / 255];
-    };
     for (const component of components.values()) {
       const wallCells = component.wallCells.map(([tx, ty]) => [tx, ty]);
       const roofColor = selectRoofColor(component.roofCells, [0.45, 0.45, 0.48]);
-      component.roofMaterial = roofColor;
       component.sideMaterial = selectSideColor(wallCells, roofColor, roofColor);
     }
 
-    const scaleColor = (color, scale) => color.map((channel) => Math.max(0, Math.min(1, channel * scale)));
-
-    // Fill the footprint represented by vertical facade source courses with one
-    // authored roof edge followed by neutral component roof bands. Authored
-    // roof/logo cells stay textured exactly once; generated depth never stretches
-    // or repeats decorative atlas rows.
+    // Join each projected facade to one authored roof-edge course. Facade rows
+    // describe vertical height, so they must not also create horizontal roof
+    // bands behind the wall.
     for (const component of components.values()) {
       const localRoofSource = (tx, ty) => {
         let sourceX = tx;
@@ -1395,14 +1377,6 @@ class WebGpuPresenter {
           [sourceX, sourceY] = nearest;
         }
         return [sourceX, sourceY];
-      };
-      const neutralRoofColor = (sourceX, sourceY, y) => {
-        const tileColor = tileAverageColor(sourceX, sourceY, component.roofMaterial);
-        const bandScale = y === 1 ? 1.02 : (y & 1) ? 0.96 : 1.03;
-        return scaleColor(
-          liftColorToLuminance(mixColor(component.roofMaterial, tileColor, 0.24), 0.32),
-          bandScale,
-        );
       };
       for (const [tx, ty, width, depth, top] of component.wallRects) {
         if (!component.roofCells.length) continue;
@@ -1429,21 +1403,6 @@ class WebGpuPresenter {
               [worldX(tx + x + 1),top,worldZ(ty + 1),textureU(sourceX + 1),textureV(sourceY + 1)],
               [worldX(tx + x),top,worldZ(ty + 1),textureU(sourceX),textureV(sourceY + 1)],
               [0, 1, 0], HD2D_SURFACE_ROOF, 1, component.base,
-            );
-          }
-        }
-        for (let y = 1; y < depth; y++) {
-          for (let x = 0; x < width; x++) {
-            const source = localRoofSource(tx + x, ty);
-            if (!source) continue;
-            const [sourceX, sourceY] = source;
-            quad(
-              [worldX(tx + x),top,worldZ(ty + y),0,0],
-              [worldX(tx + x + 1),top,worldZ(ty + y),0,0],
-              [worldX(tx + x + 1),top,worldZ(ty + y + 1),0,0],
-              [worldX(tx + x),top,worldZ(ty + y + 1),0,0],
-              [0, 1, 0], MATERIAL_NEUTRAL_ROOF, 1, component.base,
-              neutralRoofColor(sourceX, sourceY, y),
             );
           }
         }
@@ -1519,8 +1478,8 @@ class WebGpuPresenter {
         for (let tx = 0; tx < cols; tx++) {
           const edge = ordinaryEdge(tx, ty, 0, dy);
           if (!edge) continue;
-          terrainSkirt(tx, ty, edge.bottom, edge.height, 0, dy,
-                       [0, 0, dy < 0 ? -1 : 1], surfaceAt(tx, ty));
+          terrainSide(tx, ty, edge.bottom, edge.height, 0, dy,
+                      [0, 0, dy < 0 ? -1 : 1], surfaceAt(tx, ty));
         }
       }
     }
@@ -1529,8 +1488,8 @@ class WebGpuPresenter {
         for (let ty = 0; ty < rows; ty++) {
           const edge = ordinaryEdge(tx, ty, dx, 0);
           if (!edge) continue;
-          terrainSkirt(tx, ty, edge.bottom, edge.height, dx, 0,
-                       [dx < 0 ? -1 : 1, 0, 0], surfaceAt(tx, ty));
+          terrainSide(tx, ty, edge.bottom, edge.height, dx, 0,
+                      [dx < 0 ? -1 : 1, 0, 0], surfaceAt(tx, ty));
         }
       }
     }

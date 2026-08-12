@@ -1460,20 +1460,6 @@ static bool8 HdCourseIsRoofCandidate(u32 courseX, u32 courseY, u32 sampleCols,
     return FALSE;
 }
 
-static bool8 HdMapSampleIsTerrainWallCandidate(u32 index, u32 sampleX, u32 sampleCols)
-{
-    if (!HdMapSampleIsCoveredCourse(index))
-        return FALSE;
-    if (sHdMapSamples[index].collision)
-        return TRUE;
-    return (sampleX > 0
-         && HdMapSampleIsCoveredCourse(index - 1)
-         && sHdMapSamples[index - 1].collision)
-        || (sampleX + 1 < sampleCols
-         && HdMapSampleIsCoveredCourse(index + 1)
-         && sHdMapSamples[index + 1].collision);
-}
-
 static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
 {
     return sHdMapSamples[index].valid
@@ -1517,29 +1503,17 @@ static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
     return TRUE;
 }
 
-static bool8 HdMapSampleIsTerrainCourse(u32 index, u32 sampleX, u32 sampleY,
-                                        u32 sampleCols)
+static bool8 HdMapSampleIsTerrainCourse(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
 
-    if (MetatileBehavior_IsMountain(behavior)
-     || (behavior == MB_CAVE && sHdMapSamples[index].collision))
-        return TRUE;
-    if (!HdMapSampleIsTerrainWallCandidate(index, sampleX, sampleCols))
-        return FALSE;
-    for (u32 distance = 1; distance <= 4 && distance <= sampleY; distance++)
-    {
-        const u32 above = index - distance * sampleCols;
-        const u8 aboveBehavior = UNPACK_BEHAVIOR(sHdMapAttributes[above]);
-
-        if (MetatileBehavior_IsMountain(aboveBehavior)
-         || (aboveBehavior == MB_CAVE && sHdMapSamples[above].collision))
-            return TRUE;
-        if (!HdMapSampleIsOpaqueBlocked(above)
-         && !HdMapSampleIsTerrainWallCandidate(above, sampleX, sampleCols))
-            break;
-    }
-    return FALSE;
+    // Native map data names the elevated surface directly. Covered rows below
+    // it are authored vertical face/corner art for the 2D compositor; extending
+    // the mountain marker through those rows turns each face into another
+    // horizontal 16x16 slab. Keep elevation on explicit semantic terrain and
+    // let the browser mesh construct the drop at its perimeter.
+    return MetatileBehavior_IsMountain(behavior)
+        || (behavior == MB_CAVE && sHdMapSamples[index].collision);
 }
 
 static bool8 HdBehaviorIsOpenDeck(u8 behavior)
@@ -1639,7 +1613,7 @@ static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
          && evidence.touchesReflection)
             return HD_SURFACE_OPEN_DECK;
     }
-    if (HdMapSampleIsTerrainCourse(index, sampleX, sampleY, sampleCols))
+    if (HdMapSampleIsTerrainCourse(index))
         return HD_SURFACE_TERRAIN;
     // Preserve generic collision as a rendering tag only. Collision describes
     // gameplay obstruction, not structural elevation, and covers both objects
