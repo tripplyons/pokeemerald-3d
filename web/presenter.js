@@ -975,7 +975,6 @@ class WebGpuPresenter {
     const pixelU = (pixel) => (Math.max(0, Math.min(this.worldWidth - 1, pixel)) + 0.5) / this.worldWidth;
     const pixelV = (pixel) => (Math.max(0, Math.min(this.worldHeight - 1, pixel)) + 0.5) / this.worldHeight;
     const MATERIAL_NEUTRAL_BUILDING = 8;
-
     const openDeckReceiver = (tx, ty) => {
       const word = receiverAt(tx, ty);
       if ((word & HD2D_RECEIVER_VALID) === 0) return null;
@@ -1116,10 +1115,16 @@ class WebGpuPresenter {
           let sourceY = ty + 1;
           while (sourceY < rows && surfaceAt(tx, sourceY) === HD2D_SURFACE_WALL
               && componentAt(tx, sourceY) === componentAt(tx, ty)) sourceY++;
+          if (sourceY !== ty + 1) continue;
+          while (sourceY + 1 < rows
+              && (surfaceAt(tx, sourceY) === HD2D_SURFACE_WALL
+               || surfaceAt(tx, sourceY) === HD2D_SURFACE_ROOF)) sourceY++;
           sourceY = Math.min(rows - 1, sourceY);
           const ground = groundHeights[start];
-          // Replace the removed wall footprint with the first authored ground
-          // course in front. No WALL source texel is ever laid horizontally.
+          // Replace only the front-most removed wall footprint with authored
+          // ground in front. Interior wall courses remain vertical facade
+          // source only; drawing each one horizontally repeats the same
+          // authored contact-shadow/debris course behind the building.
           quad(
             [worldX(tx),ground,worldZ(ty),textureU(tx),textureV(sourceY)],
             [worldX(tx + 1),ground,worldZ(ty),textureU(tx + 1),textureV(sourceY)],
