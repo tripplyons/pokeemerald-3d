@@ -12,6 +12,7 @@ const HD2D_COMPONENT_SHIFT = HD2D_SURFACE_BITS;
 const HD2D_RECEIVER_VALID = 0x8000;
 const HD2D_RECEIVER_TERRAIN_FACE = 0x4000;
 const HD2D_RECEIVER_TERRAIN_FACE_SOUTH = 0x20;
+const HD2D_RECEIVER_TERRAIN_FACE_SELF = 0x40;
 const HD2D_RECEIVER_OFFSET_BIAS = 16;
 const HD2D_RECEIVER_OFFSET_MASK = 31;
 const HD2D_RECEIVER_DX_SHIFT = HD2D_SURFACE_BITS;
@@ -1062,9 +1063,11 @@ class WebGpuPresenter {
         const courseBottom = Math.max(bottom, courseTop - TILE_SIZE);
         let u0, u1, v0, v1;
         if (faceDepth && course < faceDepth) {
-          const sourceY = faceWord & HD2D_RECEIVER_TERRAIN_FACE_SOUTH
-            ? faceSourceY + 1 + course
-            : faceSourceY - Math.min(faceDepth, physicalCourses) + course;
+          const sourceY = faceWord & HD2D_RECEIVER_TERRAIN_FACE_SELF
+            ? faceSourceY - faceDepth + 1 + course
+            : faceWord & HD2D_RECEIVER_TERRAIN_FACE_SOUTH
+              ? faceSourceY + 1 + course
+              : faceSourceY - Math.min(faceDepth, physicalCourses) + course;
           u0 = textureU(tx); u1 = textureU(tx + 1);
           v0 = textureV(sourceY); v1 = textureV(sourceY + 1);
         } else if (dy !== 0) {
