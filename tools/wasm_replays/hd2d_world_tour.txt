@@ -1,0 +1,50 @@
+# Broad HD-2D visual tour. Warp through towns, routes, and landmarks.
+
+120 warp 0 7 31 33
+320 screenshot sootopolis-gym
+321 warp 0 7 20 36
+521 screenshot sootopolis-mart
+522 warp 0 7 43 33
+722 screenshot sootopolis-pc
+723 warp 0 5 26 18
+923 screenshot lilycove-pc
+924 warp 0 5 12 28
+1124 screenshot lilycove-harbor
+1125 warp 0 1 19 20
+1325 screenshot slateport-market
+1326 warp 0 1 28 38
+1526 screenshot slateport-harbor
+1527 warp 0 2 18 10
+1727 screenshot mauville
+1728 warp 0 3 16 20
+1928 screenshot rustboro
+1929 warp 0 4 22 14
+2129 screenshot fortree
+2130 warp 0 6 20 20
+2330 screenshot mossdeep
+2331 warp 0 0 16 16
+2531 screenshot petalburg
+2532 warp 0 14 10 10
+2732 screenshot verdanturf
+2733 warp 0 11 10 10
+2933 screenshot dewford
+2934 warp 0 15 8 18
+3134 screenshot pacifidlog
+3135 warp 0 8 18 20
+3335 screenshot evergrande
+3336 warp 0 34 20 70
+3536 screenshot route119
+3537 warp 0 26 20 20
+3737 screenshot route111
+3738 warp 24 12 20 30
+3938 screenshot mt-chimney
+3939 warp 26 4 39 55
+4139 screenshot artisan-cave
+4140 warp 26 14 3 54
+4340 screenshot frontier-east
+4341 warp 26 14 58 14
+4541 screenshot frontier-pyramid
+4542 warp 26 14 39 29
+4742 screenshot frontier-arena
+4743 warp 26 4 19 17
+4943 screenshot frontier-dome

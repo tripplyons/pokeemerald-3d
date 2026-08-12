@@ -1,0 +1,16 @@
+# Earth-only cliff seeds: hedges stay flat, rock faces stay raised.
+
+120 warp 26 14 3 54
+320 screenshot frontier-east
+321 warp 26 14 58 14
+521 screenshot frontier-pyramid
+522 warp 26 4 39 55
+722 screenshot artisan-cave
+723 warp 0 7 20 36
+923 screenshot sootopolis-mart
+924 warp 0 34 20 70
+1124 screenshot route119
+1125 warp 0 26 20 20
+1325 screenshot route111
+1326 warp 26 4 19 17
+1526 screenshot frontier-dome

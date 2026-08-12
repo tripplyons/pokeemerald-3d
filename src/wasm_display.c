@@ -1891,14 +1891,17 @@ static bool8 HdMapSampleIsCliffBandSurface(u32 index)
         && surface != HD_SURFACE_TERRAIN;
 }
 
-static bool8 HdMapSampleIsVegetationArt(u32 index)
+static bool8 HdMapSampleIsEarthArt(u32 index)
 {
     const struct HdMapSample *sample = &sHdMapSamples[index];
-    u32 green = 0;
+    u32 earth = 0;
     u32 opaque = 0;
 
     if (!sample->valid)
         return FALSE;
+    // Authored cliff/opening sheets are rock, dirt, or stone paintings.
+    // Hedges, planters, and plaza tiles share collision and width with those
+    // sheets; only earth-colored plane-0 art should stand up.
     for (u32 quadrant = 0; quadrant < 4; quadrant++)
     {
         for (u32 y = 0; y < HD2D_TILE_WIDTH; y += 2)
@@ -1906,17 +1909,33 @@ static bool8 HdMapSampleIsVegetationArt(u32 index)
             for (u32 x = 0; x < HD2D_TILE_WIDTH; x += 2)
             {
                 struct Rgb color;
+                u8 rg;
+                u8 gb;
+                u8 rb;
+                bool8 brown;
+                bool8 gray;
 
                 if (!HdMetatilePixel(sample->layout, sample->metatileId, 0,
                                      quadrant, x, y, &color))
                     continue;
                 opaque++;
-                if (color.g > color.r + 16 && color.g > color.b + 16)
-                    green++;
+                if (color.g > color.r + 12 && color.g > color.b + 12)
+                    continue;
+                rg = color.r > color.g ? color.r - color.g : color.g - color.r;
+                gb = color.g > color.b ? color.g - color.b : color.b - color.g;
+                rb = color.r > color.b ? color.r - color.b : color.b - color.r;
+                brown = color.r + 32 >= color.g
+                     && color.r > color.b + 8
+                     && color.g + 8 >= color.b
+                     && color.r >= 32;
+                gray = rg < 28 && gb < 28 && rb < 28
+                    && color.r >= 32 && color.r <= 188;
+                if (brown || gray)
+                    earth++;
             }
         }
     }
-    return opaque != 0 && green * 2 >= opaque;
+    return opaque != 0 && earth * 2 >= opaque;
 }
 
 static bool8 HdMapSampleIsWalkableFloorArt(u32 index)
@@ -1953,9 +1972,9 @@ static bool8 HdMapSampleIsCliffSeed(u32 index)
     if (HdMetatileCoverage(&sHdMapSamples[index], 0) == 0
      || HdMetatileCoverage(&sHdMapSamples[index], 1) != 0)
         return FALSE;
-    // Collision marks obstruction, not height. Hedge rows and plaza rims are
-    // plane-0 blocked copies of vegetation or walkable floor art.
-    return !HdMapSampleIsVegetationArt(index)
+    // Collision marks obstruction, not height. Only rock/dirt/stone paintings
+    // become cliff sheets; hedges and plaza copies stay on the ground.
+    return HdMapSampleIsEarthArt(index)
         && !HdMapSampleIsWalkableFloorArt(index);
 }
 
