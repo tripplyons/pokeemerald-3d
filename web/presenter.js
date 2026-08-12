@@ -1220,7 +1220,7 @@ class WebGpuPresenter {
       }
       if (!wallRows.length) continue;
       const firstRow = wallRows[0][0];
-      const frontRow = wallRows[wallRows.length - 1][0] + 1;
+      const frontRow = firstRow;
       let top = component.roofHeight;
       if (!Number.isFinite(top)) top = component.base + wallRows.length * TILE_SIZE;
       const z = worldZ(frontRow);
@@ -1325,21 +1325,23 @@ class WebGpuPresenter {
     };
     const selectSideColor = (cells, roofColor, fallback) => {
       const candidates = recurringColorBuckets(cells)
-        .sort((a, b) => a.luminance - b.luminance || b.count - a.count || b.cells - a.cells);
+        // Black outlines and transparent-underlay artifacts recur across many
+        // facade courses, but they are edge ink, not the building material.
+        // Generated closure sides should follow the recurring body color and
+        // roof tint instead of expanding those dark pixels into full slabs.
+        .filter((bucket) => bucket.luminance >= 58 || bucket.saturation >= 0.28)
+        .sort((a, b) => {
+          const scoreA = a.count + a.cells * 18 - Math.abs(a.luminance - 128) * 2
+            + a.saturation * 16;
+          const scoreB = b.count + b.cells * 18 - Math.abs(b.luminance - 128) * 2
+            + b.saturation * 16;
+          return scoreB - scoreA;
+        });
       if (!candidates.length) return fallback;
-      const target = candidates.reduce((sum, bucket) => sum + bucket.count, 0) * 0.70;
-      let accumulated = 0;
-      let selected = candidates[candidates.length - 1];
-      for (const candidate of candidates) {
-        accumulated += candidate.count;
-        if (accumulated >= target) {
-          selected = candidate;
-          break;
-        }
-      }
+      const selected = candidates[0];
       let color = bucketColor(selected);
       color = mixColor(color, roofColor, selected.luminance < 82 ? 0.22 : 0.12);
-      return liftColorToLuminance(color, 0.30);
+      return liftColorToLuminance(color, 0.38);
     };
     for (const component of components.values()) {
       const wallCells = component.wallCells.map(([tx, ty]) => [tx, ty]);

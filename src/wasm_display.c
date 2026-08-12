@@ -2016,7 +2016,12 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             while (wallTop > 1 && y - wallTop < HD2D_GEOMETRY_RADIUS
                 && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows))
                 wallTop--;
-            wallStartCourse = (wallTop - 1) * 2 + 1;
+            // Wall ownership starts at the first supported facade metatile
+            // itself. The row directly above may contain authored roof/cap
+            // art used to seed the roof flood, but claiming its lower 8px as
+            // facade inflates every building by one course and turns roof
+            // padding/transparent pixels into a detached dark wall band.
+            wallStartCourse = wallTop * 2;
             wallEndCourse = y * 2 + 2;
             spanStartCourse = spanStart * 2;
             spanEndCourse = (spanEnd + 1) * 2;
