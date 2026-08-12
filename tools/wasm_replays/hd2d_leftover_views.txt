@@ -1,0 +1,18 @@
+# Leftover crater-edge dirt and Lilycove PC underside.
+
+120 warp 0 7 31 41
+320 screenshot sootopolis-south-rim
+320 probe hd2d-courses 18
+320 probe height-map
+
+321 warp 0 7 20 36
+521 screenshot sootopolis-mart-plaza
+521 probe hd2d-courses 18
+521 probe height-map
+
+522 warp 0 5 26 18
+722 screenshot lilycove-pc
+722 probe hd2d-courses 18
+722 probe height-map
+723 view classic
+733 screenshot lilycove-pc-classic

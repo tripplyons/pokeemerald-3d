@@ -1993,24 +1993,6 @@ static bool8 HdCliffRowRun(u32 sampleY, u32 sampleCols, u32 startX, u32 endX)
     return faceCells * 2 >= width;
 }
 
-static bool8 HdCliffBandHasWalkableSouth(u32 startX, u32 endX, u32 bottom,
-                                         u32 sampleCols, u32 sampleRows)
-{
-    if (bottom + 1 >= sampleRows)
-        return FALSE;
-    for (u32 x = startX; x <= endX; x++)
-    {
-        const u32 sample = (bottom + 1) * sampleCols + x;
-
-        if (sHdMapSamples[sample].valid
-         && !sHdMapSamples[sample].collision
-         && sHdSampleBaseSurfaces[sample] != HD_SURFACE_WATER
-         && sHdSampleBaseSurfaces[sample] != HD_SURFACE_TERRAIN)
-            return TRUE;
-    }
-    return FALSE;
-}
-
 static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                                      u32 courseCols)
 {
@@ -2101,15 +2083,11 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                 x = end + 1;
                 continue;
             }
-            // Collision is not height. Depth-2 waterfront sheets are almost
-            // always hedges, plaza rims, or building bases. Keep those flat.
-            // Raise a depth-2 sheet only against a mountain cap or as a wide
-            // inland mouth with walkable ground in front. Deeper sheets can
-            // still use water or mountain as the drop.
-            if (!touchesTerrain
-             && !(depth == 2 && width >= 6
-                  && HdCliffBandHasWalkableSouth(start, end, bottom, sampleCols, sampleRows))
-             && !(depth >= 3 && touchesWater))
+            // Collision is not height. A depth-2 sheet with walkable ground in
+            // front matches both cave mouths and building bases; only the
+            // mouths sit on a mountain cap. Deeper waterfront sheets can still
+            // use water as the drop.
+            if (!touchesTerrain && !(depth >= 3 && touchesWater))
             {
                 x = end + 1;
                 continue;
