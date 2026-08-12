@@ -141,6 +141,7 @@ let renderedOpticsStrength = opticsStrength;
 let visualModeTransition = null;
 let image;
 let worldPixels;
+let worldStructuralAlphaPixels;
 let worldHeightPixels;
 let worldGroundHeightPixels;
 let worldGeometryPixels;
@@ -886,6 +887,11 @@ function refreshFrameImage() {
     instance.exports.WasmWorldBuffer(),
     instance.exports.WasmWorldBufferSize(),
   );
+  worldStructuralAlphaPixels = new Uint8Array(
+    memory.buffer,
+    instance.exports.WasmWorldStructuralAlphaBuffer(),
+    instance.exports.WasmWorldStructuralAlphaBufferSize(),
+  );
   worldHeightPixels = new Int8Array(
     memory.buffer,
     instance.exports.WasmWorldHeightBuffer(),
@@ -964,6 +970,7 @@ function render() {
   presenter.present({
     finalPixels: image.data,
     worldPixels,
+    worldStructuralAlphaPixels,
     worldHeightPixels,
     worldGroundHeightPixels,
     worldGeometryPixels,

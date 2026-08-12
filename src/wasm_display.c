@@ -43,6 +43,7 @@ extern void WasmApplyTilesetAnimations(const struct Tileset *tileset, u8 *dest, 
 #define HD2D_COMPONENT_SHIFT HD2D_SURFACE_BITS
 #define HD2D_COMPONENT_MAX (0xffff >> HD2D_COMPONENT_SHIFT)
 #define HD2D_RECEIVER_VALID 0x8000
+#define HD2D_RECEIVER_OFFSET_MASK 31
 #define HD2D_RECEIVER_OFFSET_BIAS 16
 #define HD2D_RECEIVER_DX_SHIFT HD2D_SURFACE_BITS
 #define HD2D_RECEIVER_DY_SHIFT 8
@@ -74,6 +75,8 @@ enum HdSurface
 
 typedef char HdSurfaceOpenDeckFitsPackedGeometry[
     HD_SURFACE_OPEN_DECK <= HD2D_SURFACE_MASK ? 1 : -1];
+
+#define HD2D_RECEIVER_TERRAIN_FACE 0x4000
 
 #define LAYER_BG0 0x01
 #define LAYER_BG1 0x02
@@ -121,6 +124,7 @@ struct BgLayer
 static bool8 sWasmHd2dEnabled;
 static u8 sWasmDisplayRgba[DISPLAY_PIXELS * RGBA_CHANNELS];
 static u8 sWasmWorldRgba[HD2D_WORLD_PIXELS * RGBA_CHANNELS];
+static u8 sWasmWorldStructuralAlpha[HD2D_WORLD_PIXELS];
 static u8 sWasmWorldLayerData[HD2D_WORLD_PIXELS];
 static u8 sWasmBgPriorityData[HD2D_WORLD_PIXELS];
 static s8 sWasmWorldHeightData[HD2D_WORLD_PIXELS];
@@ -1321,6 +1325,42 @@ static u16 HdMetatileCoverage(const struct HdMapSample *sample, u8 plane)
     return coverage;
 }
 
+static bool8 HdMetatilesHaveSamePlaneArt(const struct HdMapSample *left,
+                                         const struct HdMapSample *right,
+                                         u8 plane)
+{
+    if (!left->valid || !right->valid)
+        return FALSE;
+    if (left->metatileId >= NUM_METATILES_TOTAL
+     || right->metatileId >= NUM_METATILES_TOTAL)
+        return FALSE;
+
+    for (u32 quadrant = 0; quadrant < 4; quadrant++)
+    {
+        for (u32 y = 0; y < HD2D_TILE_WIDTH; y++)
+        {
+            for (u32 x = 0; x < HD2D_TILE_WIDTH; x++)
+            {
+                struct Rgb leftColor;
+                struct Rgb rightColor;
+                const bool8 leftOpaque = HdMetatilePixel(left->layout, left->metatileId,
+                                                          plane, quadrant, x, y, &leftColor);
+                const bool8 rightOpaque = HdMetatilePixel(right->layout, right->metatileId,
+                                                           plane, quadrant, x, y, &rightColor);
+
+                if (leftOpaque != rightOpaque)
+                    return FALSE;
+                if (leftOpaque
+                 && (leftColor.r != rightColor.r
+                  || leftColor.g != rightColor.g
+                  || leftColor.b != rightColor.b))
+                    return FALSE;
+            }
+        }
+    }
+    return TRUE;
+}
+
 static bool8 HdMetatilesHaveSameVisibleArt(const struct HdMapSample *left,
                                            const struct HdMapSample *right)
 {
@@ -1503,7 +1543,7 @@ static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
     return TRUE;
 }
 
-static bool8 HdMapSampleIsTerrainCourse(u32 index)
+static bool8 HdMapSampleIsDirectTerrainCourse(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
 
@@ -1514,6 +1554,32 @@ static bool8 HdMapSampleIsTerrainCourse(u32 index)
     // let the browser mesh construct the drop at its perimeter.
     return MetatileBehavior_IsMountain(behavior)
         || (behavior == MB_CAVE && sHdMapSamples[index].collision);
+}
+
+static bool8 HdMapSampleIsTerrainCapCourse(u32 index, u32 sampleX,
+                                           u32 sampleCols)
+{
+    if (HdMapSampleIsDirectTerrainCourse(index))
+        return TRUE;
+    if (!HdMapSampleIsCoveredCourse(index)
+     || !sHdMapSamples[index].collision
+     || !HdMapSampleIsStructuralMaterial(index)
+     || !HdMapSampleHasTopArt(index))
+        return FALSE;
+
+    // Native cliff families place one covered corner beside a semantic
+    // mountain span. Admit only that immediate same-row flank, and only when
+    // its underlying plane is identical to the semantic seed. Layer type and
+    // collision alone remain insufficient: both are also common on buildings.
+    if (sampleX > 0 && HdMapSampleIsDirectTerrainCourse(index - 1)
+     && HdMetatilesHaveSamePlaneArt(&sHdMapSamples[index],
+                                    &sHdMapSamples[index - 1], 0))
+        return TRUE;
+    if (sampleX + 1 < sampleCols && HdMapSampleIsDirectTerrainCourse(index + 1)
+     && HdMetatilesHaveSamePlaneArt(&sHdMapSamples[index],
+                                    &sHdMapSamples[index + 1], 0))
+        return TRUE;
+    return FALSE;
 }
 
 static bool8 HdBehaviorIsOpenDeck(u8 behavior)
@@ -1613,7 +1679,7 @@ static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
          && evidence.touchesReflection)
             return HD_SURFACE_OPEN_DECK;
     }
-    if (HdMapSampleIsTerrainCourse(index))
+    if (HdMapSampleIsTerrainCapCourse(index, sampleX, sampleCols))
         return HD_SURFACE_TERRAIN;
     // Preserve generic collision as a rendering tag only. Collision describes
     // gameplay obstruction, not structural elevation, and covers both objects
@@ -1653,6 +1719,48 @@ static u16 HdPackOpenDeckReceiver(u8 surface, s32 dx, s32 dy)
         | (surface & HD2D_SURFACE_MASK)
         | ((dx + HD2D_RECEIVER_OFFSET_BIAS) << HD2D_RECEIVER_DX_SHIFT)
         | ((dy + HD2D_RECEIVER_OFFSET_BIAS) << HD2D_RECEIVER_DY_SHIFT);
+}
+
+static void HdResolveTerrainFaceReceivers(u32 courseCols, u32 courseRows)
+{
+    const u32 sampleCols = courseCols / 2;
+
+    for (u32 courseY = 0; courseY < courseRows; courseY++)
+    {
+        for (u32 courseX = 0; courseX < courseCols; courseX++)
+        {
+            const u32 course = courseY * courseCols + courseX;
+            const u8 surface = sHdCourseGeometry[course] & HD2D_SURFACE_MASK;
+
+            if (surface != HD_SURFACE_TERRAIN)
+                continue;
+            // Native terrain faces are blocked structural sample rows directly
+            // north of a semantic mountain cap. They are source art for the
+            // exposed south edge, never additional elevated horizontal slabs.
+            // Work at sample granularity because a face family advances in
+            // 16px metatiles while the renderer publishes 8px courses.
+            {
+                const u32 sampleY = courseY / 2;
+                u32 sampleDepth = 0;
+
+                for (u32 distance = 1; distance <= 3 && distance <= sampleY; distance++)
+                {
+                    const u32 sourceSampleY = sampleY - distance;
+                    const u32 sample = sourceSampleY * sampleCols + courseX / 2;
+
+                    if (!HdMapSampleIsStructuralMaterial(sample)
+                     || !sHdMapSamples[sample].collision
+                     || HdMetatileCoverage(&sHdMapSamples[sample], 0)
+                      + HdMetatileCoverage(&sHdMapSamples[sample], 1) == 0)
+                        break;
+                    sampleDepth = distance;
+                }
+                if (sampleDepth != 0)
+                    sHdCourseReceivers[course] = HD2D_RECEIVER_TERRAIN_FACE
+                        | ((sampleDepth * 2) & HD2D_RECEIVER_OFFSET_MASK);
+            }
+        }
+    }
 }
 
 static bool8 HdBehaviorOpenDeckUsesWaterReceiver(u8 behavior)
@@ -1882,6 +1990,7 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             u32 supportCourse;
             s16 roofHeight;
             u16 building;
+            bool8 hasEntrance = FALSE;
 
             if (!HdMapSampleIsSupportedWallCore(y * sampleCols + x, sampleCols, sampleRows))
             {
@@ -1914,7 +2023,22 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             supportCourse = ((y + 1) * 2) * courseCols + (coreStart + coreEnd + 1);
             roofHeight = sHdCourseGroundHeights[supportCourse]
                        + (wallEndCourse - wallStartCourse) * HD2D_COURSE_HEIGHT;
+            // A facade sheet is owned by its actual entrance row. Scanning
+            // every row above the door creates shifted, overlapping copies of
+            // the same wall with identical height but different source bounds.
+            for (u32 wallX = spanStart; wallX <= spanEnd; wallX++)
+            {
+                const u32 sample = y * sampleCols + wallX;
+
+                hasEntrance |= HdMapSampleIsDoorCourse(sample)
+                            || sHdMapSamples[sample].hasWarpEntrance;
+            }
             if (sHdBuildingCount >= ARRAY_COUNT(sHdBuildings) || roofHeight > 127)
+            {
+                x = spanEnd + 1;
+                continue;
+            }
+            if (!hasEntrance)
             {
                 x = spanEnd + 1;
                 continue;
@@ -1925,19 +2049,9 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             sHdBuildings[building].componentId = 0;
             sHdBuildings[building].baseHeight = sHdCourseGroundHeights[supportCourse];
             sHdBuildings[building].roofHeight = roofHeight;
-            sHdBuildings[building].hasEntrance = FALSE;
+            sHdBuildings[building].hasEntrance = TRUE;
             sHdBuildings[building].isClipped = spanStart == 0 || spanEnd + 1 == sampleCols;
 
-            for (u32 wallY = wallTop; wallY <= y; wallY++)
-            {
-                for (u32 wallX = spanStart; wallX <= spanEnd; wallX++)
-                {
-                    const u32 sample = wallY * sampleCols + wallX;
-
-                    sHdBuildings[building].hasEntrance |= HdMapSampleIsDoorCourse(sample)
-                                                       || sHdMapSamples[sample].hasWarpEntrance;
-                }
-            }
             for (u32 courseY = wallStartCourse; courseY < wallEndCourse; courseY++)
             {
                 for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
@@ -2092,6 +2206,82 @@ static bool8 MapWorldPixel(s32 screenX, s32 screenY, s16 cameraOffsetX, s16 came
     return TRUE;
 }
 
+static bool8 HdStructuralPixelVisible(u32 courseX, u32 courseY,
+                                      u32 courseCols, u32 courseRows,
+                                      u8 pixelX, u8 pixelY, u8 visibleLayer)
+{
+    const u32 course = courseY * courseCols + courseX;
+    const u16 geometry = sHdCourseGeometry[course];
+    const u8 surface = geometry & HD2D_SURFACE_MASK;
+    const u16 component = geometry >> HD2D_COMPONENT_SHIFT;
+    const u32 sampleCols = courseCols / 2;
+    const u32 sample = (courseY / 2) * sampleCols + courseX / 2;
+    const u8 layerType = UNPACK_LAYER_TYPE(sHdMapAttributes[sample]);
+    const u8 topLayer = layerType == METATILE_LAYER_TYPE_COVERED ? LAYER_BG2 : LAYER_BG1;
+    const u8 bottomLayer = layerType == METATILE_LAYER_TYPE_NORMAL ? LAYER_BG2 : LAYER_BG3;
+    const u8 quadrant = (courseY & 1) * 2 + (courseX & 1);
+    struct Rgb sourceColor;
+
+    if (surface != HD_SURFACE_WALL)
+        return FALSE;
+    if (visibleLayer == topLayer)
+    {
+        if (!HdMetatilePixel(sHdMapSamples[sample].layout,
+                             sHdMapSamples[sample].metatileId, 1,
+                             quadrant, pixelX, pixelY, &sourceColor))
+            return FALSE;
+    }
+    else if (visibleLayer == bottomLayer)
+    {
+        if (!HdMetatilePixel(sHdMapSamples[sample].layout,
+                             sHdMapSamples[sample].metatileId, 0,
+                             quadrant, pixelX, pixelY, &sourceColor))
+            return FALSE;
+    }
+    else
+        return FALSE;
+
+    // Either plane may carry facade details or repeated ground underlay.
+    // Compare the visible source with the first authored receiver below this
+    // facade column, retaining only pixels that differ from the ground carried
+    // through transparent wall art.
+    for (u32 receiverY = courseY + 1; receiverY < courseRows; receiverY++)
+    {
+        const u32 receiverCourse = receiverY * courseCols + courseX;
+        const u16 receiverGeometry = sHdCourseGeometry[receiverCourse];
+        const u8 receiverSurface = receiverGeometry & HD2D_SURFACE_MASK;
+        const u16 receiverComponent = receiverGeometry >> HD2D_COMPONENT_SHIFT;
+        const u32 receiverSample = (receiverY / 2) * sampleCols + courseX / 2;
+        const u8 receiverQuadrant = (receiverY & 1) * 2 + (courseX & 1);
+        struct Rgb receiverBottom;
+        struct Rgb receiverTop;
+        struct Rgb receiverColor;
+        bool8 receiverVisible = FALSE;
+
+        if (receiverSurface == HD_SURFACE_WALL && receiverComponent == component)
+            continue;
+        if (HdMetatilePixel(sHdMapSamples[receiverSample].layout,
+                            sHdMapSamples[receiverSample].metatileId, 0,
+                            receiverQuadrant, pixelX, pixelY, &receiverBottom))
+        {
+            receiverColor = receiverBottom;
+            receiverVisible = TRUE;
+        }
+        if (HdMetatilePixel(sHdMapSamples[receiverSample].layout,
+                            sHdMapSamples[receiverSample].metatileId, 1,
+                            receiverQuadrant, pixelX, pixelY, &receiverTop))
+        {
+            receiverColor = receiverTop;
+            receiverVisible = TRUE;
+        }
+        return !receiverVisible
+            || sourceColor.r != receiverColor.r
+            || sourceColor.g != receiverColor.g
+            || sourceColor.b != receiverColor.b;
+    }
+    return TRUE;
+}
+
 static void RenderHd2dWorld(u16 dispcnt)
 {
     s16 cameraOffsetX;
@@ -2186,6 +2376,7 @@ static void RenderHd2dWorld(u16 dispcnt)
             }
         }
         HdResolveOpenDeckReceivers(courseCols, courseRows);
+        HdResolveTerrainFaceReceivers(courseCols, courseRows);
         HdClassifyBuildingComponents(sampleCols, sampleRows,
                                      renderMinMapX - minMapX, renderMinMapY - minMapY,
                                      renderMaxMapX - minMapX + 1, renderMaxMapY - minMapY + 1);
@@ -2218,6 +2409,10 @@ static void RenderHd2dWorld(u16 dispcnt)
             sWasmWorldRgba[p + 1] = color.g;
             sWasmWorldRgba[p + 2] = color.b;
             sWasmWorldRgba[p + 3] = mapVisible ? 255 : 0;
+            sWasmWorldStructuralAlpha[pixel] = HdStructuralPixelVisible(
+                courseX, courseY, sampleCols * 2, sampleRows * 2,
+                (viewX - FloorDiv16(viewX) * 16) & (HD2D_TILE_WIDTH - 1),
+                (viewY - FloorDiv16(viewY) * 16) & (HD2D_TILE_WIDTH - 1), layer) ? 255 : 0;
             sWasmWorldLayerData[pixel] = layer;
             if (layer == LAYER_BG1)
                 sWasmBgPriorityData[pixel] = ReadU16(REG_BASE + REG_OFFSET_BG1CNT) & 3;
@@ -2368,6 +2563,16 @@ u32 WasmSetAutomationWeather(u32 weather)
 u8 *WasmWorldBuffer(void)
 {
     return sWasmWorldRgba;
+}
+
+u8 *WasmWorldStructuralAlphaBuffer(void)
+{
+    return sWasmWorldStructuralAlpha;
+}
+
+u32 WasmWorldStructuralAlphaBufferSize(void)
+{
+    return sizeof(sWasmWorldStructuralAlpha);
 }
 
 void WasmSetHd2dEnabled(u32 enabled)
