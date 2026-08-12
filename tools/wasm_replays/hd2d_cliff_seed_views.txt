@@ -1,0 +1,20 @@
+# Cliff-seed tightening: hedges and plaza rims must stay flat, authored
+# cave/river faces must stay raised. Camera faces north.
+
+120 warp 26 4 39 55
+320 screenshot artisan-cave-mouth
+
+321 warp 0 7 20 36
+521 screenshot sootopolis-mart-plaza
+
+522 warp 0 7 31 41
+722 screenshot sootopolis-south-rim
+
+723 warp 0 7 43 33
+923 screenshot sootopolis-pc-plaza
+
+924 warp 0 5 26 18
+1124 screenshot lilycove-dept-store
+
+1125 warp 0 34 20 70
+1325 screenshot route119-river

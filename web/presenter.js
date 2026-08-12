@@ -1000,8 +1000,12 @@ class WebGpuPresenter {
       for (let courseBottom = bottom; courseBottom < height; courseBottom += TILE_SIZE) {
         const courseTop = Math.min(height, courseBottom + TILE_SIZE);
         const course = Math.floor((courseBottom - bottom) / TILE_SIZE);
-        const courseSourceX = Math.max(0, Math.min(cols - 1, sourceX + dx * (course + 1)));
-        const courseSourceY = Math.max(0, Math.min(rows - 1, sourceY + dy * (course + 1)));
+        let courseSourceX = Math.max(0, Math.min(cols - 1, sourceX + dx * (course + 1)));
+        let courseSourceY = Math.max(0, Math.min(rows - 1, sourceY + dy * (course + 1)));
+        if (surfaceAt(courseSourceX, courseSourceY) === HD2D_SURFACE_WATER) {
+          courseSourceX = sourceX;
+          courseSourceY = sourceY;
+        }
         const u0 = pixelU(originX + courseSourceX * TILE_SIZE);
         const u1 = pixelU(originX + courseSourceX * TILE_SIZE + TILE_SIZE - 1);
         const v0 = pixelV(originY + courseSourceY * TILE_SIZE);
@@ -1068,8 +1072,14 @@ class WebGpuPresenter {
             : faceWord & HD2D_RECEIVER_TERRAIN_FACE_SOUTH
               ? faceSourceY + 1 + course
               : faceSourceY - Math.min(faceDepth, physicalCourses) + course;
-          u0 = textureU(tx); u1 = textureU(tx + 1);
-          v0 = textureV(sourceY); v1 = textureV(sourceY + 1);
+          if (sourceY < 0 || sourceY >= rows
+              || surfaceAt(tx, sourceY) === HD2D_SURFACE_WATER) {
+            u0 = textureU(tx); u1 = textureU(tx + 1);
+            v0 = v1 = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));
+          } else {
+            u0 = textureU(tx); u1 = textureU(tx + 1);
+            v0 = textureV(sourceY); v1 = textureV(sourceY + 1);
+          }
         } else if (dy !== 0) {
           u0 = textureU(tx); u1 = textureU(tx + 1);
           v0 = v1 = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));

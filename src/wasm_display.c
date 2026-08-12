@@ -1891,6 +1891,51 @@ static bool8 HdMapSampleIsCliffBandSurface(u32 index)
         && surface != HD_SURFACE_TERRAIN;
 }
 
+static bool8 HdMapSampleIsVegetationArt(u32 index)
+{
+    const struct HdMapSample *sample = &sHdMapSamples[index];
+    u32 green = 0;
+    u32 opaque = 0;
+
+    if (!sample->valid)
+        return FALSE;
+    for (u32 quadrant = 0; quadrant < 4; quadrant++)
+    {
+        for (u32 y = 0; y < HD2D_TILE_WIDTH; y += 2)
+        {
+            for (u32 x = 0; x < HD2D_TILE_WIDTH; x += 2)
+            {
+                struct Rgb color;
+
+                if (!HdMetatilePixel(sample->layout, sample->metatileId, 0,
+                                     quadrant, x, y, &color))
+                    continue;
+                opaque++;
+                if (color.g > color.r + 16 && color.g > color.b + 16)
+                    green++;
+            }
+        }
+    }
+    return opaque != 0 && green * 2 >= opaque;
+}
+
+static bool8 HdMapSampleIsWalkableFloorArt(u32 index)
+{
+    const u16 metatileId = sHdMapSamples[index].metatileId;
+    const struct MapLayout *layout = sHdMapSamples[index].layout;
+
+    for (u32 i = 0; i < ARRAY_COUNT(sHdMapSamples); i++)
+    {
+        if (!sHdMapSamples[i].valid || sHdMapSamples[i].collision)
+            continue;
+        if (sHdMapSamples[i].layout == layout
+         && sHdMapSamples[i].metatileId == metatileId
+         && sHdSampleBaseSurfaces[i] == HD_SURFACE_GROUND)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static bool8 HdMapSampleIsCliffSeed(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
@@ -1905,26 +1950,13 @@ static bool8 HdMapSampleIsCliffSeed(u32 index)
         return FALSE;
     // Decorative objects use the top plane. Authored 2D cliff/opening sheets
     // are plane-0 paintings that currently stay flat and band under tilt.
-    return HdMetatileCoverage(&sHdMapSamples[index], 0) != 0
-        && HdMetatileCoverage(&sHdMapSamples[index], 1) == 0;
-}
-
-static bool8 HdMapSampleIsCliffFrame(u32 index)
-{
-    const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
-
-    if (HdMapSampleIsCliffSeed(index))
-        return TRUE;
-    if (!sHdMapSamples[index].valid || !sHdMapSamples[index].collision)
+    if (HdMetatileCoverage(&sHdMapSamples[index], 0) == 0
+     || HdMetatileCoverage(&sHdMapSamples[index], 1) != 0)
         return FALSE;
-    if (!HdMapSampleIsStructuralMaterial(index) || !HdMapSampleIsCliffBandSurface(index))
-        return FALSE;
-    if (HdMapSampleIsDoorCourse(index) || sHdMapSamples[index].hasWarpEntrance)
-        return FALSE;
-    if (behavior != MB_NORMAL)
-        return FALSE;
-    return HdMetatileCoverage(&sHdMapSamples[index], 0)
-         + HdMetatileCoverage(&sHdMapSamples[index], 1) != 0;
+    // Collision marks obstruction, not height. Hedge rows and plaza rims are
+    // plane-0 blocked copies of vegetation or walkable floor art.
+    return !HdMapSampleIsVegetationArt(index)
+        && !HdMapSampleIsWalkableFloorArt(index);
 }
 
 static void HdPublishCliffBandCell(u32 sampleX, u32 sampleY, u32 sampleCols,
@@ -2069,19 +2101,15 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                 x = end + 1;
                 continue;
             }
-            // Depth-2 inland mouths (cave arches) have walkable ground in
-            // front. Depth-2 pond hedges do not. Deeper waterfront sheets
-            // sit on water or a mountain cap.
-            if (!touchesTerrain && !touchesWater
+            // Collision is not height. Depth-2 waterfront sheets are almost
+            // always hedges, plaza rims, or building bases. Keep those flat.
+            // Raise a depth-2 sheet only against a mountain cap or as a wide
+            // inland mouth with walkable ground in front. Deeper sheets can
+            // still use water or mountain as the drop.
+            if (!touchesTerrain
              && !(depth == 2 && width >= 6
-                  && HdCliffBandHasWalkableSouth(start, end, bottom, sampleCols, sampleRows)))
-            {
-                x = end + 1;
-                continue;
-            }
-            if (depth == 2 && !touchesTerrain && !HdCliffBandHasWalkableSouth(start, end, bottom,
-                                                                             sampleCols, sampleRows)
-             && width > 16)
+                  && HdCliffBandHasWalkableSouth(start, end, bottom, sampleCols, sampleRows))
+             && !(depth >= 3 && touchesWater))
             {
                 x = end + 1;
                 continue;
@@ -2107,28 +2135,6 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                 raised[sample] = 1;
                 HdPublishCliffBandCell(sampleX, sampleY, sampleCols, courseCols,
                                        height, sampleY == bottom ? faceReceiver : 0);
-            }
-            for (u32 i = 0; i < count; i++)
-            {
-                const u32 sampleX = component[i] % sampleCols;
-                const u32 sampleY = component[i] / sampleCols;
-
-                for (u32 d = 0; d < ARRAY_COUNT(offsets); d++)
-                {
-                    const s32 nx = (s32)sampleX + offsets[d][0];
-                    const s32 ny = (s32)sampleY + offsets[d][1];
-                    u32 next;
-
-                    if (nx < 0 || ny < 0
-                     || nx >= (s32)sampleCols || ny >= (s32)sampleRows)
-                        continue;
-                    next = ny * sampleCols + nx;
-                    if (raised[next] || !HdMapSampleIsCliffFrame(next))
-                        continue;
-                    raised[next] = 1;
-                    HdPublishCliffBandCell(nx, ny, sampleCols, courseCols,
-                                           height, ny == (s32)bottom ? faceReceiver : 0);
-                }
             }
             x = end + 1;
         }

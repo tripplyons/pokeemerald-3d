@@ -1,0 +1,9 @@
+# Lilycove Pokemon Center / department store: hex-floor slab vs authored building.
+
+120 warp 0 5 26 18
+320 screenshot lilycove-hd
+320 probe hd2d-courses 16
+320 probe world-atlas
+320 probe height-map
+321 view classic
+331 screenshot lilycove-classic
