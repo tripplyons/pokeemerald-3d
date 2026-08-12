@@ -1053,8 +1053,7 @@ class WebGpuPresenter {
           if (faceWord & HD2D_RECEIVER_TERRAIN_FACE) break;
         }
       }
-      const faceDirection = faceWord & HD2D_RECEIVER_TERRAIN_FACE_SOUTH ? 1 : -1;
-      const faceDepth = material === HD2D_SURFACE_TERRAIN && dy === faceDirection
+      const faceDepth = material === HD2D_SURFACE_TERRAIN && dy > 0
         && (faceWord & HD2D_RECEIVER_TERRAIN_FACE)
           ? faceWord & HD2D_RECEIVER_OFFSET_MASK : 0;
       const physicalCourses = Math.ceil((height - bottom) / TILE_SIZE);

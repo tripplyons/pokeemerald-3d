@@ -49,3 +49,4 @@ prefabs.json
 /pokeemerald-*.png
 /pokeemerald_modern-*.png
 /wasm-replay-output/
+*.sav

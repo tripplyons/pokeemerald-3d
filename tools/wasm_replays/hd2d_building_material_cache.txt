@@ -1,0 +1,25 @@
+# Building-material regression using the supplied Battle Frontier save. Loading
+# a save restarts the game while retaining the WebGPU presenter, which used to
+# preserve an early black generated roof in its geometry-only terrain cache.
+120 warp 26 14 3 54
+
+# Allow the map-name card to clear before the close-up structural comparison.
+520 screenshot building-material-after-save-restart
+520 probe state
+521 probe hd2d-courses
+
+# Topology must change immediately, with generated materials rebuilt and stable.
+522 view classic
+522 screenshot building-material-classic-immediate
+523 view hd2d
+523 screenshot building-material-hd2d-immediate
+
+# Sub-tile motion must not make the world-anchored roof panels crawl, pop, or
+# reveal repeated/stretched authored markings.
+524 button up on
+528 screenshot building-material-subtile-4
+532 screenshot building-material-subtile-8
+536 screenshot building-material-subtile-12
+540 screenshot building-material-subtile-16
+556 button up off
+620 screenshot building-material-after-step

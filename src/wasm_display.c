@@ -77,6 +77,7 @@ typedef char HdSurfaceOpenDeckFitsPackedGeometry[
     HD_SURFACE_OPEN_DECK <= HD2D_SURFACE_MASK ? 1 : -1];
 
 #define HD2D_RECEIVER_TERRAIN_FACE 0x4000
+#define HD2D_RECEIVER_TERRAIN_FACE_SOUTH 0x20
 
 #define LAYER_BG0 0x01
 #define LAYER_BG1 0x02
@@ -1721,9 +1722,77 @@ static u16 HdPackOpenDeckReceiver(u8 surface, s32 dx, s32 dy)
         | ((dy + HD2D_RECEIVER_OFFSET_BIAS) << HD2D_RECEIVER_DY_SHIFT);
 }
 
+static bool8 HdMapSampleIsTerrainFaceSource(u32 sample)
+{
+    return HdMapSampleIsStructuralMaterial(sample)
+        && !HdMapSampleIsDirectTerrainCourse(sample)
+        && HdMetatileCoverage(&sHdMapSamples[sample], 0)
+         + HdMetatileCoverage(&sHdMapSamples[sample], 1) != 0;
+}
+
+static bool8 HdTerrainFaceBandValid(u32 startX, u32 endX, u32 sampleY,
+                                    u32 sampleCols)
+{
+    u32 faceCells = 0;
+    u32 gaps = 0;
+
+    for (u32 x = startX; x <= endX; x++)
+    {
+        const u32 sample = sampleY * sampleCols + x;
+
+        if (HdMapSampleIsTerrainFaceSource(sample))
+        {
+            faceCells++;
+            continue;
+        }
+        gaps++;
+        if (x == startX || x == endX)
+            return FALSE;
+        if (!HdMapSampleIsTerrainFaceSource(sample - 1)
+         || !HdMapSampleIsTerrainFaceSource(sample + 1))
+            return FALSE;
+    }
+    return faceCells != 0 && gaps <= faceCells / 2;
+}
+
+static u32 HdTerrainFaceDepth(u32 startX, u32 endX, u32 sampleY, s32 directionY,
+                              u32 sampleCols, u32 sampleRows)
+{
+    u32 sampleDepth = 0;
+
+    for (u32 distance = 1; distance <= 3; distance++)
+    {
+        const s32 sourceY = (s32)sampleY + directionY * (s32)distance;
+
+        if (sourceY < 0 || sourceY >= (s32)sampleRows)
+            break;
+        if (!HdTerrainFaceBandValid(startX, endX, (u32)sourceY, sampleCols))
+            break;
+        sampleDepth = distance;
+    }
+    return sampleDepth;
+}
+
+static void HdTerrainSpanForSample(u32 sampleX, u32 sampleY, u32 sampleCols,
+                                   u32 *startX, u32 *endX)
+{
+    u32 start = sampleX;
+    u32 end = sampleX;
+
+    while (start > 0
+        && sHdSampleBaseSurfaces[sampleY * sampleCols + start - 1] == HD_SURFACE_TERRAIN)
+        start--;
+    while (end + 1 < sampleCols
+        && sHdSampleBaseSurfaces[sampleY * sampleCols + end + 1] == HD_SURFACE_TERRAIN)
+        end++;
+    *startX = start;
+    *endX = end;
+}
+
 static void HdResolveTerrainFaceReceivers(u32 courseCols, u32 courseRows)
 {
     const u32 sampleCols = courseCols / 2;
+    const u32 sampleRows = courseRows / 2;
 
     for (u32 courseY = 0; courseY < courseRows; courseY++)
     {
@@ -1734,29 +1803,51 @@ static void HdResolveTerrainFaceReceivers(u32 courseCols, u32 courseRows)
 
             if (surface != HD_SURFACE_TERRAIN)
                 continue;
-            // Native terrain faces are blocked structural sample rows directly
-            // north of a semantic mountain cap. They are source art for the
-            // exposed south edge, never additional elevated horizontal slabs.
+            // Native terrain faces are blocked structural rows adjacent to a
+            // semantic mountain cap. They are source art for the exposed edge,
+            // never additional elevated horizontal slabs. Battle Frontier
+            // families place face rows south of the cap, while other families
+            // use rows north of it; publish the direction explicitly so the
+            // browser consumes authored courses in map order instead of
+            // mirroring the wrong side.
             // Work at sample granularity because a face family advances in
             // 16px metatiles while the renderer publishes 8px courses.
             {
+                const u32 sampleX = courseX / 2;
                 const u32 sampleY = courseY / 2;
-                u32 sampleDepth = 0;
+                u32 spanStart;
+                u32 spanEnd;
+                u32 northDepth = 0;
+                u32 southDepth = 0;
+                u32 sampleDepth;
+                u16 direction;
 
-                for (u32 distance = 1; distance <= 3 && distance <= sampleY; distance++)
+                HdTerrainSpanForSample(sampleX, sampleY, sampleCols,
+                                       &spanStart, &spanEnd);
+                if (sampleY == 0
+                 || sHdSampleBaseSurfaces[(sampleY - 1) * sampleCols + sampleX] != HD_SURFACE_TERRAIN)
+                    northDepth = HdTerrainFaceDepth(spanStart, spanEnd, sampleY, -1,
+                                                    sampleCols, sampleRows);
+                if (sampleY + 1 == sampleRows
+                 || sHdSampleBaseSurfaces[(sampleY + 1) * sampleCols + sampleX] != HD_SURFACE_TERRAIN)
+                    southDepth = HdTerrainFaceDepth(spanStart, spanEnd, sampleY, 1,
+                                                    sampleCols, sampleRows);
+                if (northDepth != 0 && southDepth != 0)
                 {
-                    const u32 sourceSampleY = sampleY - distance;
-                    const u32 sample = sourceSampleY * sampleCols + courseX / 2;
-
-                    if (!HdMapSampleIsStructuralMaterial(sample)
-                     || !sHdMapSamples[sample].collision
-                     || HdMetatileCoverage(&sHdMapSamples[sample], 0)
-                      + HdMetatileCoverage(&sHdMapSamples[sample], 1) == 0)
-                        break;
-                    sampleDepth = distance;
+                    sampleDepth = southDepth;
+                    direction = HD2D_RECEIVER_TERRAIN_FACE_SOUTH;
                 }
-                if (sampleDepth != 0)
+                else
+                {
+                    sampleDepth = northDepth != 0 ? northDepth : southDepth;
+                    direction = southDepth != 0 ? HD2D_RECEIVER_TERRAIN_FACE_SOUTH : 0;
+                }
+
+                if (sampleDepth != 0
+                 && ((direction && (courseY & 1))
+                  || (!direction && !(courseY & 1))))
                     sHdCourseReceivers[course] = HD2D_RECEIVER_TERRAIN_FACE
+                        | direction
                         | ((sampleDepth * 2) & HD2D_RECEIVER_OFFSET_MASK);
             }
         }
