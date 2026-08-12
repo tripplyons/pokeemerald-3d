@@ -160,6 +160,7 @@ struct VertexInput {
   @location(1) uv: vec2f,
   @location(2) normal: vec3f,
   @location(3) material: f32,
+  @location(4) shellAndBase: vec2f,
   @location(5) neutralColor: vec3f,
 }
 struct VertexOutput {
@@ -170,6 +171,8 @@ struct VertexOutput {
   @location(3) shadowPosition: vec3f,
   @location(4) cameraDepth: f32,
   @location(5) @interpolate(flat) neutralColor: vec3f,
+  @location(6) worldPosition: vec3f,
+  @location(7) @interpolate(flat) structureBase: f32,
 }
 @group(0) @binding(0) var worldTexture: texture_2d<f32>;
 @group(0) @binding(1) var pixelSampler: sampler;
@@ -203,6 +206,8 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
   output.normal = input.normal;
   output.material = u32(input.material);
   output.neutralColor = input.neutralColor;
+  output.worldPosition = input.position;
+  output.structureBase = input.shellAndBase.y;
   let lightClip = camera.lightTransform * vec4f(input.position, 1.0);
   output.shadowPosition = vec3f(
     lightClip.x * 0.5 + 0.5,
@@ -216,6 +221,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 const TO_KEY = normalize(vec3f(-0.45, 0.77, -0.45));
 const SURFACE_WATER = 1u;
 const MATERIAL_NEUTRAL_BUILDING = 8u;
+const MATERIAL_NEUTRAL_ROOF = 9u;
 
 fn structuralVisibility(position: vec3f, normal: vec3f) -> f32 {
   if (any(position.xy <= vec2f(0.001)) || any(position.xy >= vec2f(0.999))
@@ -246,10 +252,22 @@ struct FragmentOutput {
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   var base: vec3f;
-  if (input.material == MATERIAL_NEUTRAL_BUILDING) {
+  if (input.material == MATERIAL_NEUTRAL_BUILDING || input.material == MATERIAL_NEUTRAL_ROOF) {
     // Unauthored closure geometry uses a component-derived material. Do not
     // sample arbitrary atlas pixels that can contain paths, doors, or logos.
     base = input.neutralColor;
+    if (input.material == MATERIAL_NEUTRAL_ROOF) {
+      // Roof bands are anchored in world tile units, so they stay attached to
+      // structures during subtile movement instead of swimming in screen space.
+      let panel = min(fract(input.worldPosition.x / 8.0), fract(input.worldPosition.z / 8.0));
+      let seam = 1.0 - smoothstep(0.035, 0.105, panel);
+      base *= 1.0 - seam * 0.07;
+    } else {
+      let course = max(0.0, (input.worldPosition.y - input.structureBase) / 8.0);
+      let seam = 1.0 - smoothstep(0.025, 0.095, fract(course));
+      let tone = select(0.99, 1.01, fract(floor(course) * 0.5) >= 0.5);
+      base *= tone * (1.0 - seam * 0.07);
+    }
   } else {
     base = textureSampleLevel(worldTexture, pixelSampler, input.uv, 0.0).rgb;
   }
@@ -259,11 +277,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   let visibility = structuralVisibility(input.shadowPosition, normal);
   let receiverDensity = select(1.0, 0.44, input.material == SURFACE_WATER);
   let shadowLight = 1.0 - (1.0 - visibility) * 0.36 * receiverDensity;
-  // Give generated side/rear closure enough contrast to read as volume on a
-  // small display. The lighting-strength mix below still makes this a no-op
-  // at 0%, while authored roof and facade pixels remain untouched.
-  let closureLight = select(1.0, 0.82, input.material == MATERIAL_NEUTRAL_BUILDING);
-  let illumination = faceLight * shadowLight * closureLight;
+  let illumination = faceLight * shadowLight;
   var output: FragmentOutput;
   output.color = vec4f(base * mix(1.0, illumination, camera.values.z), 1.0);
   output.focusDepth = input.cameraDepth;
@@ -958,6 +972,7 @@ class WebGpuPresenter {
     const pixelU = (pixel) => (Math.max(0, Math.min(this.worldWidth - 1, pixel)) + 0.5) / this.worldWidth;
     const pixelV = (pixel) => (Math.max(0, Math.min(this.worldHeight - 1, pixel)) + 0.5) / this.worldHeight;
     const MATERIAL_NEUTRAL_BUILDING = 8;
+    const MATERIAL_NEUTRAL_ROOF = 9;
 
     const openDeckReceiver = (tx, ty) => {
       const word = receiverAt(tx, ty);
@@ -1183,10 +1198,10 @@ class WebGpuPresenter {
       }
     }
 
-    // Build a neutral structural color from pixels recurring across the
-    // component's authored tiles. One-off markings cannot enter the generated
-    // treatment merely by occupying many pixels in a door, logo, or sign tile.
-    const componentNeutralColor = (cells, fallback) => {
+    // Build structural colors from pixels recurring across the component's
+    // authored tiles. One-off markings cannot enter generated treatment merely
+    // by occupying many pixels in a door, logo, or sign tile.
+    const recurringColorBuckets = (cells) => {
       const buckets = new Map();
       for (let cellIndex = 0; cellIndex < cells.length; cellIndex++) {
         const [tx, ty] = cells[cellIndex];
@@ -1220,23 +1235,101 @@ class WebGpuPresenter {
         }
       }
       const minimumCells = Math.max(1, Math.ceil(cells.length * 0.55));
-      const candidates = Array.from(buckets.values())
+      return Array.from(buckets.values())
         .filter((bucket) => bucket.cells >= minimumCells)
-        .sort((a, b) => b.count - a.count || b.cells - a.cells);
+        .map((bucket) => {
+          const red = bucket.red / bucket.count;
+          const green = bucket.green / bucket.count;
+          const blue = bucket.blue / bucket.count;
+          const maximum = Math.max(red, green, blue);
+          const minimum = Math.min(red, green, blue);
+          const luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+          return {
+            ...bucket,
+            red,
+            green,
+            blue,
+            luminance,
+            chroma: maximum - minimum,
+            saturation: maximum > 0 ? (maximum - minimum) / maximum : 0,
+          };
+        });
+    };
+    const bucketColor = (bucket) => [bucket.red / 255, bucket.green / 255, bucket.blue / 255];
+    const mixColor = (a, b, amount) => a.map((channel, index) => channel * (1 - amount) + b[index] * amount);
+    const colorLuminance = (color) => color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+    const liftColorToLuminance = (color, floor) => {
+      const luminance = colorLuminance(color);
+      if (luminance >= floor || luminance <= 0) return color;
+      const scale = floor / luminance;
+      return color.map((channel) => Math.min(1, channel * scale));
+    };
+    const selectRoofColor = (cells, fallback) => {
+      const candidates = recurringColorBuckets(cells)
+        .filter((bucket) => bucket.count >= 8)
+        .sort((a, b) => {
+          const scoreA = a.chroma * Math.min(1.25, Math.max(0.35, a.luminance / 112))
+            + a.saturation * 24 + Math.log2(a.count + 1) * 3;
+          const scoreB = b.chroma * Math.min(1.25, Math.max(0.35, b.luminance / 112))
+            + b.saturation * 24 + Math.log2(b.count + 1) * 3;
+          return scoreB - scoreA || b.count - a.count || b.cells - a.cells;
+        });
       if (!candidates.length) return fallback;
-      return [candidates[0].red, candidates[0].green, candidates[0].blue].map(
-        (channel) => channel / candidates[0].count / 255,
-      );
+      return liftColorToLuminance(bucketColor(candidates[0]), 0.32);
+    };
+    const selectSideColor = (cells, roofColor, fallback) => {
+      const candidates = recurringColorBuckets(cells)
+        .sort((a, b) => a.luminance - b.luminance || b.count - a.count || b.cells - a.cells);
+      if (!candidates.length) return fallback;
+      const target = candidates.reduce((sum, bucket) => sum + bucket.count, 0) * 0.70;
+      let accumulated = 0;
+      let selected = candidates[candidates.length - 1];
+      for (const candidate of candidates) {
+        accumulated += candidate.count;
+        if (accumulated >= target) {
+          selected = candidate;
+          break;
+        }
+      }
+      let color = bucketColor(selected);
+      color = mixColor(color, roofColor, selected.luminance < 82 ? 0.22 : 0.12);
+      return liftColorToLuminance(color, 0.30);
+    };
+    const tileAverageColor = (tx, ty, fallback) => {
+      const x0 = Math.max(0, Math.min(this.worldWidth - 1, originX + tx * TILE_SIZE));
+      const y0 = Math.max(0, Math.min(this.worldHeight - 1, originY + ty * TILE_SIZE));
+      const x1 = Math.min(this.worldWidth, x0 + TILE_SIZE);
+      const y1 = Math.min(this.worldHeight, y0 + TILE_SIZE);
+      let count = 0;
+      let red = 0;
+      let green = 0;
+      let blue = 0;
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0; px < x1; px++) {
+          const offset = (py * this.worldWidth + px) * 4;
+          if (worldPixels[offset + 3] < 128) continue;
+          red += worldPixels[offset];
+          green += worldPixels[offset + 1];
+          blue += worldPixels[offset + 2];
+          count++;
+        }
+      }
+      if (!count) return fallback;
+      return [red / count / 255, green / count / 255, blue / count / 255];
     };
     for (const component of components.values()) {
       const wallCells = component.wallCells.map(([tx, ty]) => [tx, ty]);
-      const roofColor = componentNeutralColor(component.roofCells, [0.45, 0.45, 0.48]);
-      component.sideMaterial = componentNeutralColor(wallCells, roofColor);
+      const roofColor = selectRoofColor(component.roofCells, [0.45, 0.45, 0.48]);
+      component.roofMaterial = roofColor;
+      component.sideMaterial = selectSideColor(wallCells, roofColor, roofColor);
     }
 
-    // Fill the footprint represented by vertical facade source courses with
-    // the adjacent roof boundary course. This extends the authored top mass to
-    // the relocated front without ever laying facade pixels horizontally.
+    const scaleColor = (color, scale) => color.map((channel) => Math.max(0, Math.min(1, channel * scale)));
+
+    // Fill the footprint represented by vertical facade source courses with one
+    // authored roof edge followed by neutral component roof bands. Authored
+    // roof/logo cells stay textured exactly once; generated depth never stretches
+    // or repeats decorative atlas rows.
     for (const component of components.values()) {
       const localRoofSource = (tx, ty) => {
         let sourceX = tx;
@@ -1256,36 +1349,56 @@ class WebGpuPresenter {
         }
         return [sourceX, sourceY];
       };
+      const neutralRoofColor = (sourceX, sourceY, y) => {
+        const tileColor = tileAverageColor(sourceX, sourceY, component.roofMaterial);
+        const bandScale = y === 1 ? 1.02 : (y & 1) ? 0.96 : 1.03;
+        return scaleColor(
+          liftColorToLuminance(mixColor(component.roofMaterial, tileColor, 0.24), 0.32),
+          bandScale,
+        );
+      };
       for (const [tx, ty, width, depth, top] of component.wallRects) {
         if (!component.roofCells.length) continue;
         let boundaryIsRoof = false;
         for (let x = 0; x < width && !boundaryIsRoof; x++)
           boundaryIsRoof = sameRoof(tx + x, ty - 1, component.id);
         if (boundaryIsRoof) {
-          // Preserve a continuous authored roof span. Per-column nearest-roof
-          // snapping repeats source strips and opens seams whenever adjacent
-          // columns choose different boundary cells.
           const sourceY = Math.max(0, ty - 1);
           quad(
             [worldX(tx),top,worldZ(ty),textureU(tx),textureV(sourceY)],
             [worldX(tx + width),top,worldZ(ty),textureU(tx + width),textureV(sourceY)],
-            [worldX(tx + width),top,worldZ(ty + depth),textureU(tx + width),textureV(sourceY + 1)],
-            [worldX(tx),top,worldZ(ty + depth),textureU(tx),textureV(sourceY + 1)],
+            [worldX(tx + width),top,worldZ(ty + 1),textureU(tx + width),textureV(sourceY + 1)],
+            [worldX(tx),top,worldZ(ty + 1),textureU(tx),textureV(sourceY + 1)],
             [0, 1, 0], HD2D_SURFACE_ROOF, 1, component.base,
           );
-          continue;
+        } else {
+          for (let x = 0; x < width; x++) {
+            const source = localRoofSource(tx + x, ty);
+            if (!source) continue;
+            const [sourceX, sourceY] = source;
+            quad(
+              [worldX(tx + x),top,worldZ(ty),textureU(sourceX),textureV(sourceY)],
+              [worldX(tx + x + 1),top,worldZ(ty),textureU(sourceX + 1),textureV(sourceY)],
+              [worldX(tx + x + 1),top,worldZ(ty + 1),textureU(sourceX + 1),textureV(sourceY + 1)],
+              [worldX(tx + x),top,worldZ(ty + 1),textureU(sourceX),textureV(sourceY + 1)],
+              [0, 1, 0], HD2D_SURFACE_ROOF, 1, component.base,
+            );
+          }
         }
-        for (let x = 0; x < width; x++) {
-          const source = localRoofSource(tx + x, ty);
-          if (!source) continue;
-          const [sourceX, sourceY] = source;
-          quad(
-            [worldX(tx + x),top,worldZ(ty),textureU(sourceX),textureV(sourceY)],
-            [worldX(tx + x + 1),top,worldZ(ty),textureU(sourceX + 1),textureV(sourceY)],
-            [worldX(tx + x + 1),top,worldZ(ty + depth),textureU(sourceX + 1),textureV(sourceY + 1)],
-            [worldX(tx + x),top,worldZ(ty + depth),textureU(sourceX),textureV(sourceY + 1)],
-            [0, 1, 0], HD2D_SURFACE_ROOF, 1, component.base,
-          );
+        for (let y = 1; y < depth; y++) {
+          for (let x = 0; x < width; x++) {
+            const source = localRoofSource(tx + x, ty);
+            if (!source) continue;
+            const [sourceX, sourceY] = source;
+            quad(
+              [worldX(tx + x),top,worldZ(ty + y),0,0],
+              [worldX(tx + x + 1),top,worldZ(ty + y),0,0],
+              [worldX(tx + x + 1),top,worldZ(ty + y + 1),0,0],
+              [worldX(tx + x),top,worldZ(ty + y + 1),0,0],
+              [0, 1, 0], MATERIAL_NEUTRAL_ROOF, 1, component.base,
+              neutralRoofColor(sourceX, sourceY, y),
+            );
+          }
         }
       }
 
