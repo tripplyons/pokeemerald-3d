@@ -1824,25 +1824,6 @@ static void HdClaimBuildingCourse(u32 courseX, u32 courseY, u32 courseCols,
     }
 }
 
-static void HdUnionBuildingWithPriorNeighbors(u32 courseX, u32 courseY, u32 courseCols,
-                                              u16 building)
-{
-    const u32 course = courseY * courseCols + courseX;
-
-    if (courseX > 0)
-    {
-        const s16 neighbor = sHdCourseBuilding[course - 1];
-        if (neighbor >= 0 && HdBuildingHeightsEqual(building, neighbor))
-            HdUnionBuildingRoots(building, neighbor);
-    }
-    if (courseY > 0)
-    {
-        const s16 neighbor = sHdCourseBuilding[course - courseCols];
-        if (neighbor >= 0 && HdBuildingHeightsEqual(building, neighbor))
-            HdUnionBuildingRoots(building, neighbor);
-    }
-}
-
 static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
                                 u32 spanEnd, u32 sampleCols, u32 sampleRows,
                                 u32 courseCols, const struct HdBuildingBounds *bounds)
@@ -1873,7 +1854,6 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
         HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_ROOF);
         if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
             sHdBuildings[building].isClipped = TRUE;
-        HdUnionBuildingWithPriorNeighbors(courseX, courseY, courseCols, building);
         if (courseY == minY)
         {
             if (courseY > 0
@@ -1987,7 +1967,6 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                     HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
                     if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
                         sHdBuildings[building].isClipped = TRUE;
-                    HdUnionBuildingWithPriorNeighbors(courseX, courseY, courseCols, building);
                 }
             }
             HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
@@ -2001,9 +1980,9 @@ static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
 {
     u16 nextComponent = 1;
 
-    // Touching, height-compatible roof/facade bands have already been unioned
-    // while claimed. Only now require one semantic entrance for the whole
-    // connected building and reject roots clipped by either semantic or atlas
+    // Overlapping height-compatible roof/facade claims have already been
+    // unioned while claimed. Only now require one semantic entrance for the
+    // whole building and reject roots clipped by either semantic or atlas
     // boundary.
     for (u16 building = 0; building < sHdBuildingCount; building++)
     {
