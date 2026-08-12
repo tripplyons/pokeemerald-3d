@@ -2072,7 +2072,6 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
             u16 component[HD2D_SAMPLE_COLS * 8];
             bool8 touchesTerrain = FALSE;
             bool8 touchesMountain = FALSE;
-            bool8 touchesWater = FALSE;
             s8 height;
             u16 faceReceiver;
             u32 faceCourses;
@@ -2132,8 +2131,6 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                         if (MetatileBehavior_IsMountain(UNPACK_BEHAVIOR(
                                 sHdMapAttributes[ny * sampleCols + nx])))
                             touchesMountain = TRUE;
-                        if (surface == HD_SURFACE_WATER)
-                            touchesWater = TRUE;
                     }
                 }
             }
@@ -2142,11 +2139,11 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                 x = end + 1;
                 continue;
             }
-            // Collision is not height. A depth-2 sheet with walkable ground in
-            // front matches both cave mouths and building bases; only the
-            // mouths sit on mountain-tagged ground. The tag is context, not
-            // elevation. Deeper waterfront sheets can still use water as the drop.
-            if (!touchesTerrain && !touchesMountain && !(depth >= 3 && touchesWater))
+            // Collision is not height. A sheet with walkable ground in front
+            // matches cave mouths, building bases, and plaza curbs. Only the
+            // mouths sit on mountain-tagged ground or an existing cap. Water
+            // is a drop, not proof of a cliff.
+            if (!touchesTerrain && !touchesMountain)
             {
                 x = end + 1;
                 continue;
