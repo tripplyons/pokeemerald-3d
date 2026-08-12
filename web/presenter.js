@@ -268,9 +268,15 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
     let world = textureSampleLevel(worldTexture, pixelSampler, input.uv, 0.0);
     if (input.material == 5u
         && textureSampleLevel(structuralAlphaTexture, pixelSampler, input.uv, 0.0).r < 0.5) {
-      discard;
+      // 2D facade holes are ground showing through the wall art. In 3D those
+      // pixels are the building shell, not empty space.
+      if (input.neutralColor.x + input.neutralColor.y + input.neutralColor.z <= 0.001) {
+        discard;
+      }
+      base = input.neutralColor;
+    } else {
+      base = world.rgb;
     }
-    base = world.rgb;
   }
   let normal = normalize(input.normal);
   let direct = max(dot(normal, TO_KEY), 0.0);
@@ -1075,16 +1081,13 @@ class WebGpuPresenter {
           if (sourceY < 0 || sourceY >= rows
               || surfaceAt(tx, sourceY) === HD2D_SURFACE_WATER) {
             u0 = textureU(tx); u1 = textureU(tx + 1);
-            v0 = v1 = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));
+            v0 = textureV(ty); v1 = textureV(ty + 1);
           } else {
             u0 = textureU(tx); u1 = textureU(tx + 1);
             v0 = textureV(sourceY); v1 = textureV(sourceY + 1);
           }
-        } else if (dy !== 0) {
-          u0 = textureU(tx); u1 = textureU(tx + 1);
-          v0 = v1 = pixelV(originY + ty * TILE_SIZE + (dy > 0 ? TILE_SIZE - 1 : 0));
         } else {
-          u0 = u1 = pixelU(originX + tx * TILE_SIZE + (dx > 0 ? TILE_SIZE - 1 : 0));
+          u0 = textureU(tx); u1 = textureU(tx + 1);
           v0 = textureV(ty); v1 = textureV(ty + 1);
         }
         if (dy < 0) {
@@ -1231,45 +1234,14 @@ class WebGpuPresenter {
         if (surfaceAt(tx, ty) === HD2D_SURFACE_ROOF) {
           component.roofHeight = Math.max(component.roofHeight, heightAt(tx, ty));
           component.roofCells.push([tx, ty]);
+        } else if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL) {
+          component.wallCells.push([tx, ty]);
         }
       }
     }
 
     const sameRoof = (x, y, id) => inGrid(x, y)
       && surfaceAt(x, y) === HD2D_SURFACE_ROOF && componentAt(x, y) === id;
-    for (const component of components.values()) {
-      const wallRows = [];
-      for (let ty = 0; ty < rows; ty++) {
-        const cells = [];
-        for (let tx = 0; tx < cols; tx++) {
-          if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL
-              && componentAt(tx, ty) === component.id) cells.push(tx);
-        }
-        if (cells.length) wallRows.push([ty, cells]);
-      }
-      if (!wallRows.length) continue;
-      const firstRow = wallRows[0][0];
-      const frontRow = firstRow;
-      let top = component.roofHeight;
-      if (!Number.isFinite(top)) top = component.base + wallRows.length * TILE_SIZE;
-      const z = worldZ(frontRow);
-      for (const [ty, cells] of wallRows) {
-        const rowOffset = ty - firstRow;
-        const courseTop = top - rowOffset * TILE_SIZE;
-        const courseBottom = courseTop - TILE_SIZE;
-        for (const tx of cells) {
-          quad(
-            [worldX(tx),courseBottom,z,textureU(tx),textureV(ty + 1)],
-            [worldX(tx + 1),courseBottom,z,textureU(tx + 1),textureV(ty + 1)],
-            [worldX(tx + 1),courseTop,z,textureU(tx + 1),textureV(ty)],
-            [worldX(tx),courseTop,z,textureU(tx),textureV(ty)],
-            [0, 0, 1], HD2D_SURFACE_WALL, 1, component.base,
-          );
-          component.wallCells.push([tx, ty, courseTop, z]);
-        }
-      }
-      component.roofHeight = Math.max(component.roofHeight, top);
-    }
 
     // Build structural colors from pixels recurring across the component's
     // authored tiles. One-off markings cannot enter generated treatment merely
@@ -1372,10 +1344,53 @@ class WebGpuPresenter {
       color = mixColor(color, roofColor, selected.luminance < 82 ? 0.22 : 0.12);
       return liftColorToLuminance(color, 0.38);
     };
+    // 2D facade holes are missing wall surface, not generated sides. Fill them
+    // with the wall's most common non-dark field color; do not prefer the
+    // mid-tone / roof-tinted closure mix.
+    const selectWallBodyColor = (cells, fallback) => {
+      const candidates = recurringColorBuckets(cells)
+        .filter((bucket) => bucket.luminance >= 90)
+        .sort((a, b) => b.count - a.count || b.cells - a.cells);
+      if (!candidates.length) return fallback;
+      return bucketColor(candidates[0]);
+    };
     for (const component of components.values()) {
       const wallCells = component.wallCells.map(([tx, ty]) => [tx, ty]);
       const roofColor = selectRoofColor(component.roofCells, [0.45, 0.45, 0.48]);
       component.sideMaterial = selectSideColor(wallCells, roofColor, roofColor);
+      component.wallBody = selectWallBodyColor(wallCells, component.sideMaterial);
+    }
+    for (const component of components.values()) {
+      const wallRows = [];
+      for (let ty = 0; ty < rows; ty++) {
+        const cells = [];
+        for (let tx = 0; tx < cols; tx++) {
+          if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL
+              && componentAt(tx, ty) === component.id) cells.push(tx);
+        }
+        if (cells.length) wallRows.push([ty, cells]);
+      }
+      if (!wallRows.length) continue;
+      const firstRow = wallRows[0][0];
+      let top = component.roofHeight;
+      if (!Number.isFinite(top)) top = component.base + wallRows.length * TILE_SIZE;
+      const z = worldZ(firstRow);
+      const side = component.wallBody || component.sideMaterial || [0, 0, 0];
+      for (const [ty, cells] of wallRows) {
+        const rowOffset = ty - firstRow;
+        const courseTop = top - rowOffset * TILE_SIZE;
+        const courseBottom = courseTop - TILE_SIZE;
+        for (const tx of cells) {
+          quad(
+            [worldX(tx),courseBottom,z,textureU(tx),textureV(ty + 1)],
+            [worldX(tx + 1),courseBottom,z,textureU(tx + 1),textureV(ty + 1)],
+            [worldX(tx + 1),courseTop,z,textureU(tx + 1),textureV(ty)],
+            [worldX(tx),courseTop,z,textureU(tx),textureV(ty)],
+            [0, 0, 1], HD2D_SURFACE_WALL, 1, component.base, side,
+          );
+        }
+      }
+      component.roofHeight = Math.max(component.roofHeight, top);
     }
 
     // Only authored roof cells render horizontally. Copying a roof-edge tile
