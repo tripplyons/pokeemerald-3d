@@ -137,8 +137,6 @@ let perspectiveStrength = DEFAULT_PERSPECTIVE_STRENGTH;
 let zoomStrength = DEFAULT_ZOOM_STRENGTH;
 let opticsStrength = DEFAULT_OPTICS_STRENGTH;
 let renderedShadingStrength = shadingStrength;
-let renderedPerspectiveStrength = perspectiveStrength;
-let renderedZoomStrength = zoomStrength;
 let renderedOpticsStrength = opticsStrength;
 let visualModeTransition = null;
 let image;
@@ -238,10 +236,6 @@ function clampSetting(value, fallback) {
   return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : fallback;
 }
 
-function clampZoom(value, fallback) {
-  return clampSetting(value, fallback);
-}
-
 function storedVisualSettings() {
   let stored = {};
   try {
@@ -255,7 +249,7 @@ function storedVisualSettings() {
       : (stored.mode === 'classic' ? 'classic' : 'hd2d'),
     shading: clampSetting(shadingParam ?? stored.shading, DEFAULT_SHADING_STRENGTH),
     perspective: clampSetting(perspectiveParam ?? stored.perspective, DEFAULT_PERSPECTIVE_STRENGTH),
-    zoom: clampZoom(zoomParam ?? stored.zoom, DEFAULT_ZOOM_STRENGTH),
+    zoom: clampSetting(zoomParam ?? stored.zoom, DEFAULT_ZOOM_STRENGTH),
     optics: clampSetting(opticsParam ?? stored.optics, DEFAULT_OPTICS_STRENGTH),
   };
 }
@@ -276,7 +270,6 @@ function updateVisualModeTransition(now = visualModeTransitionNow()) {
   if (!visualModeTransition) return;
   if (visualModeTransition.startedAt === null) {
     visualModeTransition.startedAt = now;
-    return;
   }
   const durationMs = visualModeTransition.durationMs;
   const progress = durationMs <= 0 ? 1 : Math.min(1, Math.max(0,
@@ -284,57 +277,41 @@ function updateVisualModeTransition(now = visualModeTransitionNow()) {
   const blend = progress * progress * (3 - 2 * progress);
   renderedShadingStrength = visualModeTransition.fromShading
     + (visualModeTransition.toShading - visualModeTransition.fromShading) * blend;
-  renderedPerspectiveStrength = visualModeTransition.fromPerspective
-    + (visualModeTransition.toPerspective - visualModeTransition.fromPerspective) * blend;
-  renderedZoomStrength = visualModeTransition.fromZoom
-    + (visualModeTransition.toZoom - visualModeTransition.fromZoom) * blend;
   renderedOpticsStrength = visualModeTransition.fromOptics
     + (visualModeTransition.toOptics - visualModeTransition.fromOptics) * blend;
   if (progress < 1) return;
 
-  const completedMode = visualModeTransition.mode;
   renderedShadingStrength = visualModeTransition.toShading;
-  renderedPerspectiveStrength = visualModeTransition.toPerspective;
-  renderedZoomStrength = visualModeTransition.toZoom;
   renderedOpticsStrength = visualModeTransition.toOptics;
   visualModeTransition = null;
-  if (completedMode === 'classic') setActiveVisualMode('classic');
 }
 
 function beginVisualModeTransition(mode, now = visualModeTransitionNow()) {
   updateVisualModeTransition(now);
   if (mode === 'classic') {
-    // View topology is discrete. Keeping the HD-2D mesh active while camera
-    // depth eases toward zero projects the composed 2D atlas through partial
-    // 3D geometry instead of showing either complete view.
     visualModeTransition = null;
     renderedShadingStrength = 0;
-    renderedPerspectiveStrength = 0;
-    renderedZoomStrength = 0;
     renderedOpticsStrength = 0;
     setActiveVisualMode('classic');
     return;
   }
   if (activeVisualMode === 'classic') {
-    // Switch to the complete 3D mesh and its selected camera immediately.
-    // Lighting and focus are visual effects, so those alone ease in from zero.
     renderedShadingStrength = 0;
-    renderedPerspectiveStrength = perspectiveStrength;
-    renderedZoomStrength = zoomStrength;
     renderedOpticsStrength = 0;
     setActiveVisualMode('hd2d');
   }
+  if (reducedMotionQuery.matches) {
+    visualModeTransition = null;
+    renderedShadingStrength = shadingStrength;
+    renderedOpticsStrength = opticsStrength;
+    return;
+  }
   visualModeTransition = {
-    mode,
     startedAt: null,
-    durationMs: reducedMotionQuery.matches ? 0 : VISUAL_MODE_TRANSITION_MS,
+    durationMs: VISUAL_MODE_TRANSITION_MS,
     fromShading: renderedShadingStrength,
-    fromPerspective: renderedPerspectiveStrength,
-    fromZoom: renderedZoomStrength,
     fromOptics: renderedOpticsStrength,
-    toShading: mode === 'hd2d' ? shadingStrength : 0,
-    toPerspective: perspectiveStrength,
-    toZoom: zoomStrength,
+    toShading: shadingStrength,
     toOptics: opticsStrength,
   };
 }
@@ -347,15 +324,13 @@ function setVisualSettings(settings, persist = true, animate = true) {
   visualMode = nextVisualMode;
   shadingStrength = clampSetting(settings.shading, shadingStrength);
   perspectiveStrength = clampSetting(settings.perspective, perspectiveStrength);
-  zoomStrength = clampZoom(settings.zoom, zoomStrength);
+  zoomStrength = clampSetting(settings.zoom, zoomStrength);
   opticsStrength = clampSetting(settings.optics, opticsStrength);
 
   if (!instance) {
     activeVisualMode = visualMode;
     visualModeTransition = null;
     renderedShadingStrength = visualMode === 'hd2d' ? shadingStrength : 0;
-    renderedPerspectiveStrength = visualMode === 'hd2d' ? perspectiveStrength : 0;
-    renderedZoomStrength = visualMode === 'hd2d' ? zoomStrength : 0;
     renderedOpticsStrength = visualMode === 'hd2d' ? opticsStrength : 0;
   } else if (modeChanged && animate) {
     beginVisualModeTransition(visualMode, now);
@@ -363,39 +338,31 @@ function setVisualSettings(settings, persist = true, animate = true) {
     visualModeTransition = null;
     if (visualMode === 'hd2d' && activeVisualMode === 'classic') {
       renderedShadingStrength = 0;
-      renderedPerspectiveStrength = 0;
-      renderedZoomStrength = 0;
       renderedOpticsStrength = 0;
       setActiveVisualMode('hd2d');
     }
     renderedShadingStrength = visualMode === 'hd2d' ? shadingStrength : 0;
-    renderedPerspectiveStrength = visualMode === 'hd2d' ? perspectiveStrength : 0;
-    renderedZoomStrength = visualMode === 'hd2d' ? zoomStrength : 0;
     renderedOpticsStrength = visualMode === 'hd2d' ? opticsStrength : 0;
     setActiveVisualMode(visualMode);
   } else if (!visualModeTransition && activeVisualMode === 'hd2d') {
     renderedShadingStrength = shadingStrength;
-    renderedPerspectiveStrength = perspectiveStrength;
-    renderedZoomStrength = zoomStrength;
     renderedOpticsStrength = opticsStrength;
-  } else if (visualModeTransition?.mode === 'hd2d') {
+  } else if (visualModeTransition) {
     const previousTransition = visualModeTransition;
     const endsAt = previousTransition.startedAt === null
       ? now + previousTransition.durationMs
       : previousTransition.startedAt + previousTransition.durationMs;
     visualModeTransition = {
-      mode: 'hd2d',
       startedAt: now,
       durationMs: Math.max(0, endsAt - now),
       fromShading: renderedShadingStrength,
-      fromPerspective: renderedPerspectiveStrength,
-      fromZoom: renderedZoomStrength,
       fromOptics: renderedOpticsStrength,
       toShading: shadingStrength,
-      toPerspective: perspectiveStrength,
-      toZoom: zoomStrength,
       toOptics: opticsStrength,
     };
+  } else if (activeVisualMode === 'classic') {
+    renderedShadingStrength = 0;
+    renderedOpticsStrength = 0;
   }
 
   visualModeSelect.value = visualMode;
@@ -1016,8 +983,8 @@ function render() {
     objectPriorities,
     enhanced,
     shading: renderedShadingStrength,
-    perspective: renderedPerspectiveStrength,
-    zoom: renderedZoomStrength,
+    perspective: activeVisualMode === 'hd2d' ? perspectiveStrength : 0,
+    zoom: activeVisualMode === 'hd2d' ? zoomStrength : 0,
     optics: renderedOpticsStrength,
   });
 }
@@ -1563,10 +1530,10 @@ function automationState() {
     zoomStrength,
     opticsStrength,
     renderedShadingStrength,
-    renderedPerspectiveStrength,
-    renderedZoomStrength,
+    renderedPerspectiveStrength: activeVisualMode === 'hd2d' ? perspectiveStrength : 0,
+    renderedZoomStrength: activeVisualMode === 'hd2d' ? zoomStrength : 0,
     renderedOpticsStrength,
-    visualModeTransition: visualModeTransition?.mode ?? null,
+    visualModeTransition: visualModeTransition ? 'hd2d' : null,
     sceneKind: lastSceneKind,
     blendControl: u16[(REG + 0x50) >> 1],
     renderScale,
