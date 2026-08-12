@@ -1036,6 +1036,53 @@ class WebGpuPresenter {
       }
     };
 
+    // Ordinary terrain sides are the skirt of the elevated authored surface,
+    // not a stack of unrelated neighboring map tiles. Sampling the top tile's
+    // exposed edge continuously prevents pavement, water, or flowerbed pixels
+    // below a ledge from becoming horizontal bands on its vertical face.
+    const terrainSkirt = (tx, ty, bottom, height, dx, dy, normal, material) => {
+      if (bottom >= height) return;
+      let u0, u1, v0, v1;
+      if (dy > 0) {
+        u0 = textureU(tx); u1 = textureU(tx + 1);
+        v0 = v1 = pixelV(originY + ty * TILE_SIZE + TILE_SIZE - 1);
+      } else if (dy < 0) {
+        u0 = textureU(tx); u1 = textureU(tx + 1);
+        v0 = v1 = pixelV(originY + ty * TILE_SIZE);
+      } else if (dx > 0) {
+        u0 = u1 = pixelU(originX + tx * TILE_SIZE + TILE_SIZE - 1);
+        v0 = textureV(ty); v1 = textureV(ty + 1);
+      } else {
+        u0 = u1 = pixelU(originX + tx * TILE_SIZE);
+        v0 = textureV(ty); v1 = textureV(ty + 1);
+      }
+      if (dy < 0) {
+        const z = worldZ(ty);
+        quad([worldX(tx + 1),bottom,z,u1,v1],
+             [worldX(tx),bottom,z,u0,v1],
+             [worldX(tx),height,z,u0,v0],
+             [worldX(tx + 1),height,z,u1,v0], normal, material);
+      } else if (dy > 0) {
+        const z = worldZ(ty + 1);
+        quad([worldX(tx),bottom,z,u0,v0],
+             [worldX(tx + 1),bottom,z,u1,v0],
+             [worldX(tx + 1),height,z,u1,v1],
+             [worldX(tx),height,z,u0,v1], normal, material);
+      } else if (dx < 0) {
+        const x = worldX(tx);
+        quad([x,bottom,worldZ(ty),u1,v0],
+             [x,bottom,worldZ(ty + 1),u1,v1],
+             [x,height,worldZ(ty + 1),u0,v1],
+             [x,height,worldZ(ty),u0,v0], normal, material);
+      } else {
+        const x = worldX(tx + 1);
+        quad([x,bottom,worldZ(ty + 1),u0,v1],
+             [x,bottom,worldZ(ty),u0,v0],
+             [x,height,worldZ(ty),u1,v0],
+             [x,height,worldZ(ty + 1),u1,v1], normal, material);
+      }
+    };
+
     // Merge source-aligned horizontal courses. Roofs merge only when C says
     // they have the same frame-local owner; facade source is never a floor.
     const visited = new Uint8Array(cols * rows);
@@ -1472,7 +1519,7 @@ class WebGpuPresenter {
         for (let tx = 0; tx < cols; tx++) {
           const edge = ordinaryEdge(tx, ty, 0, dy);
           if (!edge) continue;
-          verticalSide(tx, ty, edge.bottom, edge.height, tx, ty, 0, dy,
+          terrainSkirt(tx, ty, edge.bottom, edge.height, 0, dy,
                        [0, 0, dy < 0 ? -1 : 1], surfaceAt(tx, ty));
         }
       }
@@ -1482,7 +1529,7 @@ class WebGpuPresenter {
         for (let ty = 0; ty < rows; ty++) {
           const edge = ordinaryEdge(tx, ty, dx, 0);
           if (!edge) continue;
-          verticalSide(tx, ty, edge.bottom, edge.height, tx, ty, dx, 0,
+          terrainSkirt(tx, ty, edge.bottom, edge.height, dx, 0,
                        [dx < 0 ? -1 : 1, 0, 0], surfaceAt(tx, ty));
         }
       }

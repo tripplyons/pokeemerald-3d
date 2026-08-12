@@ -1641,12 +1641,11 @@ static u8 HdMapSampleBaseSurface(u32 index, u32 sampleX, u32 sampleY,
     }
     if (HdMapSampleIsTerrainCourse(index, sampleX, sampleY, sampleCols))
         return HD_SURFACE_TERRAIN;
-    // Only cells with top-plane art obstruct. Bottom-plane-only collision
-    // tiles (border hedges, fences) render flat in the classic view, so
-    // extruding them as obstacles produces spurious side faces that sample
-    // adjacent pavement instead of their own art.
-    if (sample->collision
-     && HdMetatileCoverage(sample, 1) != 0)
+    // Preserve generic collision as a rendering tag only. Collision describes
+    // gameplay obstruction, not structural elevation, and covers both objects
+    // and flat decorative art. HdSurfaceBaseHeight keeps this surface on the
+    // authored ground plane instead of inventing a solid 16x16 block.
+    if (sample->collision && HdMetatileCoverage(sample, 1) != 0)
         return HD_SURFACE_OBSTACLE;
     return HD_SURFACE_GROUND;
 }
@@ -1662,8 +1661,13 @@ static s8 HdSurfaceBaseHeight(u8 surface)
         return 4;
     case HD_SURFACE_TERRAIN:
         return 24;
+    // Generic collision is not a structural height contract. Its source art
+    // includes trees, flowers, signs, planters, fences, and decorative floors;
+    // raising the whole 16x16 cell invents solid slabs around transparent or
+    // flat pixels. Keep that art on the authored ground plane and reserve
+    // elevation for semantic terrain, decks, water, and building components.
     case HD_SURFACE_OBSTACLE:
-        return 4;
+        return 0;
     default:
         return 0;
     }
