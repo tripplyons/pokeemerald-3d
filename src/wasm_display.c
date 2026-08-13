@@ -1443,8 +1443,9 @@ static bool8 HdMapSampleIsDoorCourse(u32 index)
 
 static bool8 HdMapSampleIsCoveredCourse(u32 index)
 {
+    // COVERED is a layer contract, not a behavior. Fortree cottages and
+    // Lilycove houses mark porch/door tiles MB_NO_RUNNING on that layer.
     return sHdMapSamples[index].valid
-        && UNPACK_BEHAVIOR(sHdMapAttributes[index]) == MB_NORMAL
         && UNPACK_LAYER_TYPE(sHdMapAttributes[index]) == METATILE_LAYER_TYPE_COVERED;
 }
 
@@ -1505,6 +1506,10 @@ static bool8 HdMapSampleIsFloorSurface(u32 index, u32 sampleCols, u32 sampleRows
     // Walkable floor art is a floor even when a collision copy sits inside a
     // building footprint or a covered porch uses the same painting as the
     // deck in front.
+    // Authored doors keep their own walkable painting, so matching that
+    // painting as floor art would flatten every cottage and house entrance.
+    if (HdMapSampleIsDoorCourse(index))
+        return FALSE;
     return HdMapSampleIsWalkableFloorArt(index)
         || HdMapSampleMatchesWalkableFront(index, sampleCols, sampleRows);
 }
@@ -1681,8 +1686,17 @@ static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRo
      || index + sampleCols >= sampleCols * sampleRows
      || !sHdMapSamples[index].valid)
         return FALSE;
-    return (HdMapSampleIsDoorCourse(index) || HdMapSampleIsCoveredCourse(index))
-        && HdMapSampleIsOpaqueBlocked(index - sampleCols)
+    // Cottage porches keep NORMAL collision art beside the door. COVERED
+    // fences and plaza sheets are not facades unless they sit on a door.
+    if (!(HdMapSampleIsDoorCourse(index)
+       || HdMapSampleIsCoveredCourse(index)
+       || (sHdMapSamples[index].collision
+        && HdMapSampleHasVisibleArt(index)
+        && HdMapSampleIsStructuralMaterial(index)
+        && !HdMapSampleIsDecorativeOverlay(index)
+        && !HdMapSampleIsFoliageArt(index))))
+        return FALSE;
+    return HdMapSampleIsOpaqueBlocked(index - sampleCols)
         && sHdMapSamples[index + sampleCols].valid
         && !sHdMapSamples[index + sampleCols].collision
         // Walkable mountain caps sit in front of cave warps and other
