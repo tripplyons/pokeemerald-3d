@@ -1550,18 +1550,84 @@ static bool8 HdMapSampleIsBuildingMass(u32 index, u32 sampleCols, u32 sampleRows
                                    sampleCols, sampleRows);
 }
 
+static bool8 HdMapSamplePlanesMatch(u32 index)
+{
+    const struct HdMapSample *sample = &sHdMapSamples[index];
+
+    if (!sample->valid)
+        return FALSE;
+    if (HdMetatileCoverage(sample, 1) == 0)
+        return TRUE;
+    for (u32 quadrant = 0; quadrant < 4; quadrant++)
+    {
+        for (u32 y = 0; y < HD2D_TILE_WIDTH; y++)
+        {
+            for (u32 x = 0; x < HD2D_TILE_WIDTH; x++)
+            {
+                struct Rgb bottom;
+                struct Rgb top;
+                const bool8 bottomOpaque = HdMetatilePixel(sample->layout, sample->metatileId,
+                                                            0, quadrant, x, y, &bottom);
+                const bool8 topOpaque = HdMetatilePixel(sample->layout, sample->metatileId,
+                                                         1, quadrant, x, y, &top);
+
+                if (bottomOpaque != topOpaque)
+                    return FALSE;
+                if (bottomOpaque
+                 && (bottom.r != top.r || bottom.g != top.g || bottom.b != top.b))
+                    return FALSE;
+            }
+        }
+    }
+    return TRUE;
+}
+
+static bool8 HdMapSampleSitsOnFacade(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    const u32 sampleX = index % sampleCols;
+    const u32 sampleY = index / sampleCols;
+
+    return sampleY + 1 < sampleRows
+        && HdMapSampleIsFacadeBody((sampleY + 1) * sampleCols + sampleX,
+                                   sampleCols, sampleRows);
+}
+
+static bool8 HdMapSampleIsSolidRoofSheet(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    const u32 sampleY = index / sampleCols;
+    const bool8 massAbove = sampleY > 0
+        && HdMapSampleIsBuildingMass(index - sampleCols, sampleCols, sampleRows);
+
+    if (!sHdMapSamples[index].valid
+     || !sHdMapSamples[index].collision
+     || !HdMapSampleIsStructuralMaterial(index)
+     || !HdMapSampleHasVisibleArt(index)
+     || HdMapSampleIsFloorSurface(index, sampleCols, sampleRows)
+     || HdMapSampleIsDoorCourse(index)
+     || HdMapSampleIsFoliageArt(index))
+        return FALSE;
+    if (HdMapSampleIsCoveredCourse(index))
+    {
+        // Dedicated COVERED roof rows sit above the facade. A 1-row MART/PC
+        // tile is only a cap when nothing above already owns the roof.
+        if (!HdMapSampleHasFacadeSupport(index, sampleCols, sampleRows))
+            return TRUE;
+        return !massAbove;
+    }
+    // Solid caps paint the same sheet on both planes, or only plane 0.
+    // Window and gable rows overlay different top-plane house art.
+    return HdMapSamplePlanesMatch(index)
+        && HdMapSampleSitsOnFacade(index, sampleCols, sampleRows);
+}
+
 static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
                                u32 sampleRows)
 {
     const u32 sampleX = courseX / 2;
     const u32 sampleY = courseY / 2;
     const u32 sample = sampleY * sampleCols + sampleX;
-    const bool8 onFacade = sampleY + 1 < sampleRows
-        && HdMapSampleIsFacadeBody((sampleY + 1) * sampleCols + sampleX,
-                                   sampleCols, sampleRows);
-    const bool8 massAbove = sampleY > 0
-        && HdMapSampleIsBuildingMass((sampleY - 1) * sampleCols + sampleX,
-                                     sampleCols, sampleRows);
+    const u32 south = sampleY + 1 < sampleRows
+        ? (sampleY + 1) * sampleCols + sampleX : sample;
 
     // Landmark roofs are authored caps on a facade. Collision top-art also
     // covers hedges and planter rims; green overlays stay on the ground.
@@ -1572,22 +1638,33 @@ static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
      || HdMapSampleIsDoorCourse(sample)
      || HdMapSampleIsFoliageArt(sample))
         return FALSE;
-    if (HdMapSampleIsCoveredCourse(sample))
+    if (HdMapSampleIsCoveredCourse(sample)
+     && HdMapSampleHasFacadeSupport(sample, sampleCols, sampleRows)
+     && HdMapSampleIsBuildingMass(sampleY > 0 ? sample - sampleCols : sample,
+                                  sampleCols, sampleRows))
     {
-        // Dedicated COVERED roof rows sit above the facade. 1-row MART/PC
-        // tiles are both facade and roof, so only their upper 8px is a cap.
-        if (!HdMapSampleHasFacadeSupport(sample, sampleCols, sampleRows))
-            return TRUE;
-        return !massAbove && (courseY & 1) == 0;
+        // 1-row MART/PC tiles are both facade and roof. Keep the lower 8px
+        // as wall and peel the upper 8px as the cap.
+        return (courseY & 1) == 0;
     }
-    if (!onFacade)
-        return FALSE;
-    // Fortree roof sheets are plaza overlays on a facade. Plane-0-only
-    // MART/PC caps have no top-plane art. Window and gable rows keep that
-    // art and stay in the facade stack.
-    if (HdMapSampleIsDecorativeOverlay(sample))
+    if (HdMapSampleIsSolidRoofSheet(sample, sampleCols, sampleRows))
         return TRUE;
-    return !HdMapSampleHasTopArt(sample);
+    // Eaves keep top-plane edge art beside a solid roof sheet. They sit on
+    // the same facade or on another roof/eave row, not on open plaza.
+    if (HdMapSampleHasTopArt(sample)
+     && (HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows)
+      || HdMapSampleIsDecorativeOverlay(south)
+      || HdMapSampleIsSolidRoofSheet(south, sampleCols, sampleRows)
+      || HdMapSampleIsBuildingMass(south, sampleCols, sampleRows))
+     && ((sampleX > 0
+       && HdMapSampleIsSolidRoofSheet(sample - 1, sampleCols, sampleRows))
+      || (sampleX + 1 < sampleCols
+       && HdMapSampleIsSolidRoofSheet(sample + 1, sampleCols, sampleRows))))
+        return TRUE;
+    // Same-width MART/PC window rows sit on the door/COVERED facade. They
+    // are the authored roof sheet, not a second cardboard wall.
+    return HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows)
+        && (HdMapSampleIsDoorCourse(south) || HdMapSampleIsCoveredCourse(south));
 }
 
 static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
