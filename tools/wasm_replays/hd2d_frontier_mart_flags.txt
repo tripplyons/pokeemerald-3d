@@ -1,0 +1,24 @@
+# Battle Frontier Outside West: mart building glitches and flag foreground
+# masking around the dock south of the mart.
+
+120 warp 26 4 51 46
+320 screenshot mart-from-north
+320 probe state
+321 warp 26 4 47 51
+521 screenshot west-of-mart
+522 button down on
+680 button down off
+700 screenshot at-flag-row
+700 probe state
+701 button right on
+733 button right off
+750 screenshot flag-right-1
+751 button right on
+783 button right off
+800 screenshot flag-right-2
+800 probe state
+801 button down on
+865 button down off
+880 screenshot flag-down
+880 probe state
+881 probe hd2d-courses

@@ -347,9 +347,10 @@ struct VertexInput {
   @location(5) drawSize: vec2f,
   @location(6) affine: f32,
   @location(7) matrix: vec4f,
-  @location(8) screenOrigin: vec2f,
+  @location(8) maskAtlas: vec2f,
   @location(9) objectInfo: vec2f,
   @location(10) cameraDepth: f32,
+  @location(11) screenOrigin: vec2f,
 }
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -359,12 +360,14 @@ struct VertexOutput {
   @location(3) @interpolate(flat) drawSize: vec2u,
   @location(4) @interpolate(flat) affine: u32,
   @location(5) @interpolate(flat) matrix: vec4i,
-  @location(6) @interpolate(flat) screenOrigin: vec2i,
+  @location(6) maskAtlas: vec2f,
   @location(7) @interpolate(flat) objectInfo: vec2u,
   @location(8) @interpolate(flat) cameraDepth: f32,
+  @location(9) @interpolate(flat) screenOrigin: vec2i,
 }
 @group(0) @binding(0) var objectTexture: texture_2d_array<f32>;
 @group(0) @binding(1) var bgPriorityTexture: texture_2d<u32>;
+@group(0) @binding(2) var structuralAlphaTexture: texture_2d<f32>;
 
 @vertex
 fn vertexMain(input: VertexInput) -> VertexOutput {
@@ -376,9 +379,10 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
   output.drawSize = vec2u(input.drawSize);
   output.affine = u32(input.affine);
   output.matrix = vec4i(input.matrix);
-  output.screenOrigin = vec2i(input.screenOrigin);
+  output.maskAtlas = input.maskAtlas;
   output.objectInfo = vec2u(input.objectInfo);
   output.cameraDepth = input.cameraDepth;
+  output.screenOrigin = vec2i(input.screenOrigin);
   return output;
 }
 
@@ -406,9 +410,19 @@ fn objectColor(input: VertexOutput) -> vec4f {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
-  let screen = input.screenOrigin + vec2i(floor(input.uv));
+  // Elevated structural art (roofs, gate spans) is extruded, so it keeps the
+  // exact flat GBA-space overlap mask. Flat receiver details (flags) render
+  // foreshortened on the ground plane, so their mask uses the CPU-inverted
+  // ground-plane projection: the receiver pixel actually rendered at this
+  // screen location. Mixing them up either bares actors under gate roofs or
+  // occludes actors above a flag's drawn art.
   let prioritySize = vec2i(textureDimensions(bgPriorityTexture));
-  let atlas = screen + (prioritySize - vec2i(240, 160)) / 2;
+  let flatAtlas = input.screenOrigin + vec2i(floor(input.uv))
+    + (prioritySize - vec2i(240, 160)) / 2;
+  let flatIn = all(flatAtlas >= vec2i(0)) && all(flatAtlas < prioritySize);
+  let structural = flatIn
+    && textureLoad(structuralAlphaTexture, flatAtlas, 0).r >= 0.5;
+  let atlas = select(vec2i(floor(input.maskAtlas)), flatAtlas, structural);
   let inAtlas = all(atlas >= vec2i(0)) && all(atlas < prioritySize);
   var occluded = false;
   if (inAtlas) {
@@ -579,7 +593,7 @@ const CAMERA_TILT_DEGREES = 45.384615;
 const CAMERA_NEAR = 32;
 const CAMERA_FAR = 1024;
 const VERTEX_FLOATS = 14;
-const BILLBOARD_VERTEX_FLOATS = 20;
+const BILLBOARD_VERTEX_FLOATS = 22;
 const CAST_SHADOW_VERTEX_FLOATS = 16;
 const STRUCTURAL_SHADOW_SIZE = 1024;
 const LIGHT_MAP_SPAN = 1280;
@@ -809,6 +823,10 @@ class WebGpuPresenter {
         },
       }] },
       primitive: { topology: 'triangle-list' },
+      // A projected silhouette lands on its receiver plane. Testing against the
+      // structural depth buffer keeps silhouettes whose ground landing point is
+      // hidden behind extruded geometry from printing onto roofs and facades.
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less-equal' },
     });
     this.castShadowBindGroup = device.createBindGroup({
       layout: this.castShadowPipeline.getBindGroupLayout(0), entries: [
@@ -847,6 +865,7 @@ class WebGpuPresenter {
         { shaderLocation: 8, offset: 60, format: 'float32x2' },
         { shaderLocation: 9, offset: 68, format: 'float32x2' },
         { shaderLocation: 10, offset: 76, format: 'float32' },
+        { shaderLocation: 11, offset: 80, format: 'float32x2' },
       ] }],
     };
     const billboardBlend = {
@@ -866,6 +885,7 @@ class WebGpuPresenter {
       layout: this.billboardPipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: this.objectTexture.createView({ dimension: '2d-array' }) },
         { binding: 1, resource: this.bgPriorityTexture.createView() },
+        { binding: 2, resource: this.structuralAlphaTexture.createView() },
       ],
     });
     const cinematicModule = device.createShaderModule({ label: 'cinematic HD-2D shader', code: CINEMATIC_SHADER });
@@ -1725,9 +1745,16 @@ class WebGpuPresenter {
     });
     const normalVertices = [];
     const vertex = (vertices, x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
-                    affine, pa, pb, pc, pd, screenX, screenY, oamId, priority, cameraDepth) =>
+                    affine, pa, pb, pc, pd, atlasX, atlasY, oamId, priority, cameraDepth,
+                    screenX, screenY) =>
       vertices.push(x, y, u, v, depth, layer, sourceW, sourceH, drawW, drawH,
-                    affine, pa, pb, pc, pd, screenX, screenY, oamId, priority, cameraDepth);
+                    affine, pa, pb, pc, pd, atlasX, atlasY, oamId, priority, cameraDepth,
+                    screenX, screenY);
+    const angle = CAMERA_TILT_DEGREES * tilt * Math.PI / 180;
+    const sine = Math.sin(angle);
+    const cosine = Math.cos(angle);
+    const zoomOut = 0.30 * zoom + 0.76923077 * zoom * zoom * (zoom - 0.35);
+    const focal = CAMERA_HEIGHT / (1 + zoomOut);
     for (const layer of order) {
       const o = layer * 16;
       const oamId = objectDescriptors[o];
@@ -1748,19 +1775,32 @@ class WebGpuPresenter {
 
       const groundX = anchorX - this.width / 2;
       const groundZ = anchorY - this.height / 2;
-      const projected = this.cameraProjection(
-        groundX, this.terrainGroundHeightAt(groundX, groundZ), groundZ, tilt, zoom,
-      );
+      const groundHeight = this.terrainGroundHeightAt(groundX, groundZ);
+      const projected = this.cameraProjection(groundX, groundHeight, groundZ, tilt, zoom);
       const x0 = projected.x + (screenX - anchorX) * projected.scale;
       const x1 = x0 + drawW * projected.scale;
       const y0 = projected.y + (screenY - anchorY) * projected.scale;
       const y1 = y0 + drawH * projected.scale;
-      const extra = [0, layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd,
-                     screenX, screenY, oamId, priority, projected.cameraDepth];
+      // Invert the ground-plane projection at each corner: the BG priority
+      // mask must test the receiver pixel rendered at the corner's screen
+      // position, not the flat GBA overlap, or foreground details such as
+      // flags occlude actors above their foreshortened art.
+      const maskPoint = (px, py) => {
+        const vy = this.height / 2 - py;
+        const denominator = vy * sine - cosine * focal;
+        if (Math.abs(denominator) < 1e-6)
+          return [px - this.width / 2 + this.worldWidth / 2, py - this.height / 2 + this.worldHeight / 2];
+        const z = (vy * (CAMERA_HEIGHT - groundHeight * cosine) - groundHeight * sine * focal) / denominator;
+        const depth = CAMERA_HEIGHT - groundHeight * cosine - z * sine;
+        return [(px - this.width / 2) * depth / focal + this.worldWidth / 2, z + this.worldHeight / 2];
+      };
+      const extra = [0, layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd];
+      const tail = [oamId, priority, projected.cameraDepth, screenX, screenY];
       for (const point of [
         [x0,y0,0,0], [x1,y0,drawW,0], [x1,y1,drawW,drawH],
         [x0,y0,0,0], [x1,y1,drawW,drawH], [x0,y1,0,drawH],
-      ]) vertex(normalVertices, point[0], point[1], point[2], point[3], ...extra);
+      ]) vertex(normalVertices, point[0], point[1], point[2], point[3], ...extra,
+                ...maskPoint(point[0], point[1]), ...tail);
     }
 
     const data = new Float32Array(normalVertices);
@@ -1850,6 +1890,7 @@ class WebGpuPresenter {
       const castShadowPass = encoder.beginRenderPass({
         label: 'unified projected shadow mask pass',
         colorAttachments: [{ view: this.castShadowTexture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: this.depthTexture.createView(), depthReadOnly: true },
       });
       castShadowPass.setPipeline(this.castShadowPipeline); castShadowPass.setBindGroup(0, this.castShadowBindGroup); castShadowPass.setVertexBuffer(0, this.castShadowVertexBuffer); castShadowPass.draw(castShadowVertexCount); castShadowPass.end();
 
