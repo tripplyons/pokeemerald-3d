@@ -1206,6 +1206,69 @@ class WebGpuPresenter {
       }
     }
 
+    // Component membership is decoded, never inferred. Every wall source
+    // course maps to one physical course on the component's shared front
+    // plane. The source mask may be stepped, but it never creates another
+    // physical facade plane.
+    const components = new Map();
+    for (let ty = 0; ty < rows; ty++) {
+      for (let tx = 0; tx < cols; tx++) {
+        const id = componentAt(tx, ty);
+        if (!id) continue;
+        let component = components.get(id);
+        if (!component) {
+          component = {
+            id,
+            base: groundHeights[ty * cols + tx],
+            roofHeight: -Infinity,
+            roofCells: [],
+            wallCells: [],
+          };
+          components.set(id, component);
+        }
+        component.base = Math.min(component.base, groundHeights[ty * cols + tx]);
+        if (surfaceAt(tx, ty) === HD2D_SURFACE_ROOF) {
+          component.roofHeight = Math.max(component.roofHeight, heightAt(tx, ty));
+          component.roofCells.push([tx, ty]);
+        } else if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL) {
+          component.wallCells.push([tx, ty]);
+        }
+      }
+    }
+
+    // A roofed component's slab slides south by the depth of its wall
+    // source rows so the single authored roof meets the facade at the
+    // walkable front line — no repeated or synthesized courses. The box is
+    // correspondingly shallower at its back: the vacated rows show the
+    // ground receiver and sit mostly hidden behind the slab at play tilts.
+    for (const component of components.values()) {
+      component.frontShift = 0;
+      if (!Number.isFinite(component.roofHeight)) continue;
+      const groups = new Map();
+      for (const [tx, ty] of component.wallCells) {
+        const word = facadeAt(tx, ty);
+        const id = word & 0xffff;
+        if (!id) continue;
+        let group = groups.get(id);
+        if (!group) {
+          group = { maxTy: ty, topByColumn: new Map() };
+          groups.set(id, group);
+        }
+        group.maxTy = Math.max(group.maxTy, ty);
+        const topTy = group.topByColumn.get(tx);
+        if (topTy === undefined || ty < topTy) group.topByColumn.set(tx, ty);
+      }
+      for (const group of groups.values()) {
+        for (const topTy of group.topByColumn.values())
+          component.frontShift = Math.max(component.frontShift,
+                                          group.maxTy + 1 - topTy);
+      }
+    }
+    const roofShiftAt = (x, y) => {
+      const component = components.get(componentAt(x, y));
+      return component ? component.frontShift : 0;
+    };
+
     const visited = new Uint8Array(cols * rows);
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
@@ -1264,43 +1327,14 @@ class WebGpuPresenter {
           topV0 = textureV(capY);
           topV1 = textureV(capY + 1);
         }
+        const roofShift = shell ? roofShiftAt(tx, ty) : 0;
         quad(
-          [worldX(tx), height, worldZ(ty), textureU(tx), topV0],
-          [worldX(tx + width), height, worldZ(ty), textureU(tx + width), topV0],
-          [worldX(tx + width), height, worldZ(ty + depth), textureU(tx + width), topV1],
-          [worldX(tx), height, worldZ(ty + depth), textureU(tx), topV1],
+          [worldX(tx), height, worldZ(ty + roofShift), textureU(tx), topV0],
+          [worldX(tx + width), height, worldZ(ty + roofShift), textureU(tx + width), topV0],
+          [worldX(tx + width), height, worldZ(ty + depth + roofShift), textureU(tx + width), topV1],
+          [worldX(tx), height, worldZ(ty + depth + roofShift), textureU(tx), topV1],
           [0, 1, 0], surfaceAt(tx, ty), shell ? 1 : 0, shell ? groundHeights[start] : 0,
         );
-      }
-    }
-
-    // Component membership is decoded, never inferred. Every wall source
-    // course maps to one physical course on the component's shared front
-    // plane. The source mask may be stepped, but it never creates another
-    // physical facade plane.
-    const components = new Map();
-    for (let ty = 0; ty < rows; ty++) {
-      for (let tx = 0; tx < cols; tx++) {
-        const id = componentAt(tx, ty);
-        if (!id) continue;
-        let component = components.get(id);
-        if (!component) {
-          component = {
-            id,
-            base: groundHeights[ty * cols + tx],
-            roofHeight: -Infinity,
-            roofCells: [],
-            wallCells: [],
-          };
-          components.set(id, component);
-        }
-        component.base = Math.min(component.base, groundHeights[ty * cols + tx]);
-        if (surfaceAt(tx, ty) === HD2D_SURFACE_ROOF) {
-          component.roofHeight = Math.max(component.roofHeight, heightAt(tx, ty));
-          component.roofCells.push([tx, ty]);
-        } else if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL) {
-          component.wallCells.push([tx, ty]);
-        }
       }
     }
 
@@ -1421,7 +1455,6 @@ class WebGpuPresenter {
     for (const component of components.values()) {
       const wallCells = component.wallCells.map(([tx, ty]) => [tx, ty]);
       const roofColor = selectRoofColor(component.roofCells, [0.45, 0.45, 0.48]);
-      component.roofMaterial = roofColor;
       component.sideMaterial = selectSideColor(wallCells, roofColor, roofColor);
       component.wallBody = selectWallBodyColor(wallCells, component.sideMaterial);
     }
@@ -1462,7 +1495,6 @@ class WebGpuPresenter {
           ? Math.max(...group.cells.map(([, ty]) => ty)) + 1
           : group.anchorY;
         const z = worldZ(frontTy);
-        const columns = new Map();
         for (const [tx, ty, offset] of group.cells) {
           const courseTop = top - offset * TILE_SIZE;
           const courseBottom = courseTop - TILE_SIZE;
@@ -1473,45 +1505,6 @@ class WebGpuPresenter {
             [worldX(tx),courseTop,z,textureU(tx),textureV(ty)],
             [0, 0, 1], HD2D_SURFACE_WALL, 1, component.base, side,
           );
-          const column = columns.get(tx);
-          if (!column || ty < column.ty)
-            columns.set(tx, { ty, courseTop });
-        }
-        // Standing the facade at the front opens the strip above its source
-        // rows. Cap it flush with the roof plane by continuing the eave
-        // course that already borders the wall top: repeating that authored
-        // course keeps roof material and shading without stretching or
-        // duplicating one-off art like signs, which live in wall courses.
-        for (const [tx, column] of columns) {
-          if (column.ty >= frontTy) continue;
-          const backZ = worldZ(column.ty);
-          if (inGrid(tx, column.ty - 1)
-              && surfaceAt(tx, column.ty - 1) === HD2D_SURFACE_ROOF
-              && componentAt(tx, column.ty - 1) === component.id) {
-            const v0 = textureV(column.ty - 1);
-            const v1 = textureV(column.ty);
-            for (let ty = column.ty; ty < frontTy; ty++) {
-              quad(
-                [worldX(tx), column.courseTop, worldZ(ty), textureU(tx), v0],
-                [worldX(tx + 1), column.courseTop, worldZ(ty), textureU(tx + 1), v0],
-                [worldX(tx + 1), column.courseTop, worldZ(ty + 1), textureU(tx + 1), v1],
-                [worldX(tx), column.courseTop, worldZ(ty + 1), textureU(tx), v1],
-                [0, 1, 0], HD2D_SURFACE_ROOF, 1, component.base,
-              );
-            }
-          }
-          for (const dx of [-1, 1]) {
-            if (columns.has(tx + dx)) continue;
-            const x = worldX(dx < 0 ? tx : tx + 1);
-            quad(
-              [x, component.base, dx < 0 ? z : backZ, textureU(tx), textureV(column.ty)],
-              [x, component.base, dx < 0 ? backZ : z, textureU(tx), textureV(column.ty)],
-              [x, column.courseTop, dx < 0 ? backZ : z, textureU(tx), textureV(column.ty)],
-              [x, column.courseTop, dx < 0 ? z : backZ, textureU(tx), textureV(column.ty)],
-              [dx, 0, 0], MATERIAL_NEUTRAL_BUILDING, 1, component.base,
-              component.sideMaterial || side,
-            );
-          }
         }
       }
       component.roofHeight = Math.max(component.roofHeight, top);
@@ -1524,15 +1517,20 @@ class WebGpuPresenter {
       // Close only exposed building perimeter with the same component-derived
       // side treatment. Wall source rows are vertical art, not horizontal
       // footprint, so they must never generate a second closure skin.
+      // Closure faces follow the slab's shifted footprint, while interior
+      // edges are still decided by source adjacency — the shift is rigid,
+      // so roof-roof seams stay interior and the south edge lands on the
+      // facade plane wherever wall source sits below.
+      const shift = component.frontShift || 0;
       for (const [tx, ty] of component.roofCells) {
         const height = heightAt(tx, ty);
         for (const dx of [-1, 1]) {
           if (sameRoof(tx + dx, ty, component.id)) continue;
           if (inGrid(tx + dx, ty) && surfaceAt(tx + dx, ty) === HD2D_SURFACE_WALL
               && componentAt(tx + dx, ty) === component.id) continue;
-          const bottom = Math.max(component.base, heightAt(tx + dx, ty));
+          const bottom = Math.max(component.base, heightAt(tx + dx, ty + shift));
           if (bottom >= height) continue;
-          verticalSide(tx, ty, bottom, height, tx, ty, dx, 0,
+          verticalSide(tx, ty + shift, bottom, height, tx, ty, dx, 0,
                        [dx < 0 ? -1 : 1, 0, 0], MATERIAL_NEUTRAL_BUILDING,
                        1, component.base, component.sideMaterial);
         }
@@ -1540,9 +1538,9 @@ class WebGpuPresenter {
           if (sameRoof(tx, ty + dy, component.id)) continue;
           if (inGrid(tx, ty + dy) && componentAt(tx, ty + dy) === component.id
               && surfaceAt(tx, ty + dy) === HD2D_SURFACE_WALL) continue;
-          const bottom = Math.max(component.base, heightAt(tx, ty + dy));
+          const bottom = Math.max(component.base, heightAt(tx, ty + dy + shift));
           if (bottom >= height) continue;
-          verticalSide(tx, ty, bottom, height, tx, ty, 0, dy,
+          verticalSide(tx, ty + shift, bottom, height, tx, ty, 0, dy,
                        [0, 0, dy < 0 ? -1 : 1], MATERIAL_NEUTRAL_BUILDING,
                        1, component.base, component.sideMaterial);
         }
