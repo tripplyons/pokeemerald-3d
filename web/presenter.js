@@ -292,8 +292,13 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   // Flat receiver art uses the billboard shader's exact per-pixel BG
   // priority mask for foreground details such as flags. Keeping the opaque
   // receiver at its projected depth would also hide actors behind the nearby
-  // ground-colored pixels that surround those details.
-  output.depth = select(input.position.z, 0.99999, input.material == SURFACE_GROUND);
+  // ground-colored pixels that surround those details. Water is a flat
+  // receiver too: at its real depth it would swallow reflections, which
+  // render below their owner's anchor and therefore behind the surface.
+  output.depth = select(
+    input.position.z, 0.99999,
+    input.material == SURFACE_GROUND || input.material == SURFACE_WATER,
+  );
   return output;
 }
 `;
@@ -1868,12 +1873,22 @@ class WebGpuPresenter {
         const depth = CAMERA_HEIGHT - groundHeight * cosine - z * sine;
         return [(px - this.width / 2) * depth / focal + this.worldWidth / 2, z + this.worldHeight / 2];
       };
-      const extra = [0, layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd];
+      const extra = [layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd];
       const tail = [oamId, priority, projected.cameraDepth, screenX, screenY];
+      // Upright-plane depth: foot rows at ground depth, head rows nearer by
+      // their height, so structures occlude actors behind them while an actor
+      // in front of a wall keeps its head. The small camera-ward bias wins
+      // coplanar ties (standing at a facade line or on a structural deck).
+      const spriteDepth = (v) => {
+        const lift = anchorY - screenY - v;
+        return Math.min(0.9999, Math.max(0.0002,
+          (projected.cameraDepth - lift * cosine - 2 - CAMERA_NEAR) / (CAMERA_FAR - CAMERA_NEAR)));
+      };
       for (const point of [
         [x0,y0,0,0], [x1,y0,drawW,0], [x1,y1,drawW,drawH],
         [x0,y0,0,0], [x1,y1,drawW,drawH], [x0,y1,0,drawH],
-      ]) vertex(normalVertices, point[0], point[1], point[2], point[3], ...extra,
+      ]) vertex(normalVertices, point[0], point[1], point[2], point[3],
+                spriteDepth(point[3]), ...extra,
                 ...maskPoint(point[0], point[1]), ...tail);
     }
 
