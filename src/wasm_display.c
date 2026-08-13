@@ -140,6 +140,10 @@ static u16 sWasmWorldReceiverData[HD2D_WORLD_PIXELS];
 static u32 sWasmWorldFacadeData[HD2D_WORLD_PIXELS];
 static s32 sWasmWorldPixelOriginX;
 static s32 sWasmWorldPixelOriginY;
+static s32 sHdDebugMinMapX;
+static s32 sHdDebugMinMapY;
+static u32 sHdDebugSampleCols;
+static u32 sHdDebugSampleRows;
 static u8 sWasmObjectRgba[DISPLAY_PIXELS * RGBA_CHANNELS];
 static u8 sWasmObjectIdData[DISPLAY_PIXELS];
 static u8 sObjectSourceRgba[128 * OBJECT_SOURCE_SIZE * OBJECT_SOURCE_SIZE * RGBA_CHANNELS];
@@ -1613,6 +1617,7 @@ static bool8 HdMapSampleIsWalkableFloorArt(u32 index);
 static bool8 HdMapSamplePlane0IsFloorArt(u32 index);
 static bool8 HdMapSampleIsFoliageArt(u32 index);
 static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRows);
+static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows);
 
 static bool8 HdMapSampleMatchesWalkableFront(u32 index, u32 sampleCols, u32 sampleRows)
 {
@@ -1798,6 +1803,11 @@ static bool8 HdMapSampleIsSolidRoofSheetUncached(u32 index, u32 sampleCols, u32 
      || HdMapSampleIsDoorCourse(index)
      || HdMapSampleIsFoliageArt(index))
         return FALSE;
+    // Prop stacks (shelves, plant boxes, crates) are their own support and
+    // must never read as a building cap, or the eaves rule spreads their
+    // roof status onto neighboring facade columns.
+    if (HdMapSampleIsPropColumn(index, sampleCols, sampleRows))
+        return FALSE;
     if (HdMapSampleIsCoveredCourse(index))
     {
         const u32 south = sampleY + 1 < sampleRows
@@ -1853,12 +1863,30 @@ static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
     if (HdMapSampleIsCoveredCourse(sample)
      && HdMapSampleHasFacadeSupport(sample, sampleCols, sampleRows)
      && !HdMapSampleIsCoveredCourse(south)
+     && !HdMapSampleIsCoveredCourse(sampleY > 0 ? sample - sampleCols : sample)
      && HdMapSampleIsBuildingMass(sampleY > 0 ? sample - sampleCols : sample,
                                   sampleCols, sampleRows))
     {
         // 1-row MART/PC tiles are both facade and roof. Keep the lower 8px
         // as wall and peel the upper 8px as the cap. COVERED cottage posts
-        // sit on another COVERED course and stay wall.
+        // sit on another COVERED course and stay wall, and a COVERED course
+        // above means this row is the lower body of a taller facade, not a
+        // one-row cap.
+        return (courseY & 1) == 0;
+    }
+    if (HdMapSampleIsCoveredCourse(sample)
+     && sampleY > 0
+     && HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows)
+     && (HdMapSampleIsCoveredCourse(south) || HdMapSampleIsDoorCourse(south))
+     && sHdMapSamples[sample - sampleCols].collision
+     && HdMapSampleIsDecorativeOverlay(sample - sampleCols)
+     && HdMapSampleIsStructuralMaterial(sample - sampleCols))
+    {
+        // A COVERED course pinched between a decorative roof sheet above and
+        // a covered/door facade below is the sloped transition of the cap
+        // (recessed storefronts). Peel its upper 8px into the roof so the
+        // flood can bridge onto the flat cap rows. Cottage bodies keep
+        // NORMAL or COVERED art above and stay wall.
         return (courseY & 1) == 0;
     }
     if (HdMapSampleIsSolidRoofSheet(sample, sampleCols, sampleRows))
@@ -2004,7 +2032,7 @@ static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
     return TRUE;
 }
 
-static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols)
+static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
 {
     u32 probe = index;
 
@@ -2012,6 +2040,12 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols)
     // facade support just like a wall-with-door column, but they are plain
     // collision art from plaza to open sky. Genuine facade columns carry
     // covered, door, or warp art somewhere in their collision run.
+    // Walk to the base of the collision run first so the same answer comes
+    // back for every course of the stack, not just its bottom row.
+    while (probe + sampleCols < sampleCols * sampleRows
+        && sHdMapSamples[probe + sampleCols].valid
+        && sHdMapSamples[probe + sampleCols].collision)
+        probe += sampleCols;
     while (probe >= sampleCols)
     {
         if (!sHdMapSamples[probe].valid)
@@ -3004,10 +3038,10 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             // support but belong to the plaza, not the wall sheet. Trimming
             // them keeps shelves and trees out of the building shell.
             while (spanStart < spanEnd
-                && HdMapSampleIsPropColumn(y * sampleCols + spanStart, sampleCols))
+                && HdMapSampleIsPropColumn(y * sampleCols + spanStart, sampleCols, sampleRows))
                 spanStart++;
             while (spanEnd > spanStart
-                && HdMapSampleIsPropColumn(y * sampleCols + spanEnd, sampleCols))
+                && HdMapSampleIsPropColumn(y * sampleCols + spanEnd, sampleCols, sampleRows))
                 spanEnd--;
 
             wallTop = y;
@@ -3065,7 +3099,7 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                     // Prop stacks standing inside a recessed span (courtyard
                     // shelves, planters) support the row contract but are
                     // plaza furniture, not wall sheet.
-                    if (HdMapSampleIsPropColumn(y * sampleCols + courseX / 2, sampleCols))
+                    if (HdMapSampleIsPropColumn(y * sampleCols + courseX / 2, sampleCols, sampleRows))
                         continue;
                     HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
                     if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
@@ -3258,11 +3292,18 @@ static bool8 HdStructuralPixelVisible(u32 courseX, u32 courseY,
     if ((visibleLayer != topLayer && visibleLayer != bottomLayer)
      || (visiblePacked >> 24) == 0)
         return FALSE;
+    // The primary art plane is the authored facade/roof sheet itself. Its
+    // pixels may reuse the same palette colors as the plaza pattern below, so
+    // a ground-match test there punches per-pixel holes through real walls
+    // and signs, which render as clear-color speckle. Only the underlay plane
+    // can carry ground through transparent wall art.
+    if (visibleLayer == topLayer)
+        return TRUE;
     sourceColor.r = visiblePacked;
     sourceColor.g = visiblePacked >> 8;
     sourceColor.b = visiblePacked >> 16;
 
-    // Either plane may carry facade details or repeated ground underlay.
+    // The underlay plane may carry facade details or repeated ground underlay.
     // Compare the visible source with the first authored receiver below this
     // facade column, retaining only pixels that differ from the ground carried
     // through transparent wall art.
@@ -3296,10 +3337,58 @@ static bool8 HdStructuralPixelVisible(u32 courseX, u32 courseY,
             receiverColor = receiverTop;
             receiverVisible = TRUE;
         }
-        return !receiverVisible
-            || sourceColor.r != receiverColor.r
-            || sourceColor.g != receiverColor.g
-            || sourceColor.b != receiverColor.b;
+        if (!receiverVisible
+         || sourceColor.r != receiverColor.r
+         || sourceColor.g != receiverColor.g
+         || sourceColor.b != receiverColor.b)
+            return TRUE;
+        // The center pixel equals the ground below. Authored facade ink can
+        // coincide with the plaza's sparkle dots pixel-for-pixel (shared
+        // palette), and dropping those punches the plaza pattern through
+        // walls and signs as clear-color speckle. Genuine baked ground
+        // matches in wide runs, so demand the horizontal 5-pixel run to
+        // match too before treating this pixel as carried underlay.
+        {
+            const u8 sourcePlane = visibleLayer == topLayer ? 1 : 0;
+            const u8 quadrant = (courseY & 1) * 2 + (courseX & 1);
+
+            for (s32 dx = -2; dx <= 2; dx++)
+            {
+                const s32 nx = (s32)pixelX + dx;
+                struct Rgb sourceNeighbor;
+                struct Rgb receiverNeighbor;
+                struct Rgb probe;
+                bool8 neighborVisible = FALSE;
+
+                if (dx == 0 || nx < 0 || nx >= HD2D_TILE_WIDTH)
+                    continue;
+                if (!HdMetatilePixel(sHdMapSamples[sample].layout,
+                                     sHdMapSamples[sample].metatileId,
+                                     sourcePlane, quadrant, (u8)nx, pixelY,
+                                     &sourceNeighbor))
+                    continue; // transparent art keeps the carried run going
+                if (HdMetatilePixel(sHdMapSamples[receiverSample].layout,
+                                    sHdMapSamples[receiverSample].metatileId, 0,
+                                    receiverQuadrant, (u8)nx, pixelY, &probe))
+                {
+                    receiverNeighbor = probe;
+                    neighborVisible = TRUE;
+                }
+                if (HdMetatilePixel(sHdMapSamples[receiverSample].layout,
+                                    sHdMapSamples[receiverSample].metatileId, 1,
+                                    receiverQuadrant, (u8)nx, pixelY, &probe))
+                {
+                    receiverNeighbor = probe;
+                    neighborVisible = TRUE;
+                }
+                if (!neighborVisible
+                 || sourceNeighbor.r != receiverNeighbor.r
+                 || sourceNeighbor.g != receiverNeighbor.g
+                 || sourceNeighbor.b != receiverNeighbor.b)
+                    return TRUE; // palette coincidence, keep structural
+            }
+        }
+        return FALSE;
     }
     return TRUE;
 }
@@ -3358,6 +3447,11 @@ static void RenderHd2dWorld(u16 dispcnt)
     const s32 maxMapY = renderMaxMapY + HD2D_GEOMETRY_RADIUS;
     const u32 sampleCols = maxMapX - minMapX + 1;
     const u32 sampleRows = maxMapY - minMapY + 1;
+
+    sHdDebugMinMapX = minMapX;
+    sHdDebugMinMapY = minMapY;
+    sHdDebugSampleCols = sampleCols;
+    sHdDebugSampleRows = sampleRows;
 
     for (u32 predicate = 0; predicate < HD_PREDICATE_COUNT; predicate++)
         memset(sHdSamplePredicateCaches[predicate], 0, sampleCols * sampleRows);
@@ -3834,6 +3928,52 @@ u8 *WasmDisplayObjectPriorities(void)
 u32 WasmDisplayObjectPrioritiesSize(void)
 {
     return sizeof(sObjectPriorities);
+}
+
+// Debug aid: expose the sample-grid classification predicates for one map
+// tile (gBackupMapLayout coordinates, i.e. map-local + MAP_OFFSET). Reads the
+// same caches the classifier fills, so results match the last rendered frame.
+u32 WasmHdDebugSamplePredicates(s32 mapX, s32 mapY)
+{
+    const u32 cols = sHdDebugSampleCols;
+    const u32 rows = sHdDebugSampleRows;
+    const s32 sampleX = mapX - sHdDebugMinMapX;
+    const s32 sampleY = mapY - sHdDebugMinMapY;
+    u32 index;
+    u32 bits = 0;
+
+    if (cols == 0 || sampleX < 0 || sampleY < 0
+     || sampleX >= (s32)cols || sampleY >= (s32)rows)
+        return 0xffffffff;
+    index = (u32)sampleY * cols + (u32)sampleX;
+    if (sHdMapSamples[index].valid) bits |= 1u << 0;
+    if (sHdMapSamples[index].collision) bits |= 1u << 1;
+    if (HdMapSampleIsStructuralMaterial(index)) bits |= 1u << 2;
+    if (HdMapSampleHasVisibleArt(index)) bits |= 1u << 3;
+    if (HdMapSampleHasTopArt(index)) bits |= 1u << 4;
+    if (HdMapSamplePlanesMatch(index)) bits |= 1u << 5;
+    if (HdMapSampleIsFloorSurface(index, cols, rows)) bits |= 1u << 6;
+    if (HdMapSampleIsDoorCourse(index)) bits |= 1u << 7;
+    if (HdMapSampleIsCoveredCourse(index)) bits |= 1u << 8;
+    if (HdMapSampleIsFoliageArt(index)) bits |= 1u << 9;
+    if (HdMapSampleIsDecorativeOverlay(index)) bits |= 1u << 10;
+    if (HdMapSampleIsWalkableFloorArt(index)) bits |= 1u << 11;
+    if (HdMapSamplePlane0IsFloorArt(index)) bits |= 1u << 12;
+    if (HdMapSampleHasFacadeSupport(index, cols, rows)) bits |= 1u << 13;
+    if (HdMapSampleIsFacadeBody(index, cols, rows)) bits |= 1u << 14;
+    if (HdMapSampleSitsOnFacade(index, cols, rows)) bits |= 1u << 15;
+    if (HdMapSampleIsSolidRoofSheet(index, cols, rows)) bits |= 1u << 16;
+    if (HdMapSampleIsBuildingMass(index, cols, rows)) bits |= 1u << 17;
+    if (HdMapSampleIsPropColumn(index, cols, rows)) bits |= 1u << 18;
+    if (HdMapSampleIsSupportedWallCore(index, cols, rows)) bits |= 1u << 19;
+    if (HdMapSampleMatchesWalkableFront(index, cols, rows)) bits |= 1u << 20;
+    if (HdMapSampleIsRoofCapCourse(index, cols, rows)) bits |= 1u << 21;
+    if (HdCourseIsRoofArt((u32)sampleX * 2, (u32)sampleY * 2, cols, rows)) bits |= 1u << 22;
+    if (HdCourseIsRoofArt((u32)sampleX * 2, (u32)sampleY * 2 + 1, cols, rows)) bits |= 1u << 23;
+    if (HdCourseIsRoofArt((u32)sampleX * 2 + 1, (u32)sampleY * 2, cols, rows)) bits |= 1u << 24;
+    if (HdCourseIsRoofArt((u32)sampleX * 2 + 1, (u32)sampleY * 2 + 1, cols, rows)) bits |= 1u << 25;
+    if (sHdMapSamples[index].hasWarpEntrance) bits |= 1u << 26;
+    return bits;
 }
 
 u8 *WasmDisplayBuffer(void)

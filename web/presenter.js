@@ -1179,37 +1179,40 @@ class WebGpuPresenter {
 
     // Merge source-aligned horizontal courses. Roofs merge only when C says
     // they have the same frame-local owner; facade source is never a floor.
+    // Wall source rows are removed from the floor, and roof pixels use an
+    // authored alpha mask. Put the real receiver beneath EVERY structural
+    // tile — merged roof rectangles must not skip theirs, or discarded
+    // facade pixels over the footprint reveal the scene clear color as
+    // black speckle instead of the ground below the building.
+    for (let ty = 0; ty < rows; ty++) {
+      for (let tx = 0; tx < cols; tx++) {
+        if (surfaceAt(tx, ty) !== HD2D_SURFACE_WALL
+            && surfaceAt(tx, ty) !== HD2D_SURFACE_ROOF) continue;
+        let sourceY = ty + 1;
+        while (sourceY < rows
+            && (surfaceAt(tx, sourceY) === HD2D_SURFACE_WALL
+             || surfaceAt(tx, sourceY) === HD2D_SURFACE_ROOF)
+            && (surfaceAt(tx, sourceY) !== HD2D_SURFACE_WALL
+             || componentAt(tx, sourceY) === componentAt(tx, ty))) sourceY++;
+        sourceY = Math.min(rows - 1, sourceY);
+        const ground = groundHeights[ty * cols + tx];
+        quad(
+          [worldX(tx),ground,worldZ(ty),textureU(tx),textureV(sourceY)],
+          [worldX(tx + 1),ground,worldZ(ty),textureU(tx + 1),textureV(sourceY)],
+          [worldX(tx + 1),ground,worldZ(ty + 1),textureU(tx + 1),textureV(sourceY + 1)],
+          [worldX(tx),ground,worldZ(ty + 1),textureU(tx),textureV(sourceY + 1)],
+          [0, 1, 0], surfaceAt(tx, sourceY),
+        );
+      }
+    }
+
     const visited = new Uint8Array(cols * rows);
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
         const start = ty * cols + tx;
         if (visited[start]) continue;
         visited[start] = 1;
-        const structuralSource = surfaceAt(tx, ty) === HD2D_SURFACE_WALL
-          || surfaceAt(tx, ty) === HD2D_SURFACE_ROOF;
-        if (structuralSource) {
-          // Wall source rows are removed from the floor, and roof pixels now
-          // use an authored alpha mask. Put the real receiver beneath both:
-          // otherwise transparent roof pixels reveal the scene clear color as
-          // black rectangular holes instead of the ground below the building.
-          let sourceY = ty + 1;
-          while (sourceY < rows
-              && (surfaceAt(tx, sourceY) === HD2D_SURFACE_WALL
-               || surfaceAt(tx, sourceY) === HD2D_SURFACE_ROOF)
-              && (surfaceAt(tx, sourceY) !== HD2D_SURFACE_WALL
-               || componentAt(tx, sourceY) === componentAt(tx, ty))) sourceY++;
-          sourceY = Math.min(rows - 1, sourceY);
-          const ground = groundHeights[start];
-          const isWall = surfaceAt(tx, ty) === HD2D_SURFACE_WALL;
-          quad(
-            [worldX(tx),ground,worldZ(ty),textureU(tx),textureV(sourceY)],
-            [worldX(tx + 1),ground,worldZ(ty),textureU(tx + 1),textureV(sourceY)],
-            [worldX(tx + 1),ground,worldZ(ty + 1),textureU(tx + 1),textureV(sourceY + 1)],
-            [worldX(tx),ground,worldZ(ty + 1),textureU(tx),textureV(sourceY + 1)],
-            [0, 1, 0], surfaceAt(tx, sourceY),
-          );
-          if (isWall) continue;
-        }
+        if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL) continue;
 
         const word = geometry[start];
         const height = heights[start];
