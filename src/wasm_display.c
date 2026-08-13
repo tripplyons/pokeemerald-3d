@@ -1861,20 +1861,6 @@ static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
             && !HdMapSampleIsDoorCourse(south);
     }
     if (HdMapSampleIsCoveredCourse(sample)
-     && HdMapSampleHasFacadeSupport(sample, sampleCols, sampleRows)
-     && !HdMapSampleIsCoveredCourse(south)
-     && !HdMapSampleIsCoveredCourse(sampleY > 0 ? sample - sampleCols : sample)
-     && HdMapSampleIsBuildingMass(sampleY > 0 ? sample - sampleCols : sample,
-                                  sampleCols, sampleRows))
-    {
-        // 1-row MART/PC tiles are both facade and roof. Keep the lower 8px
-        // as wall and peel the upper 8px as the cap. COVERED cottage posts
-        // sit on another COVERED course and stay wall, and a COVERED course
-        // above means this row is the lower body of a taller facade, not a
-        // one-row cap.
-        return (courseY & 1) == 0;
-    }
-    if (HdMapSampleIsCoveredCourse(sample)
      && sampleY > 0
      && HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows)
      && (HdMapSampleIsCoveredCourse(south) || HdMapSampleIsDoorCourse(south))
@@ -3049,11 +3035,15 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                 && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows)
                 && !HdMapRowIsRoofOverhang(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows))
                 wallTop--;
-            // The north half of wallTop is the roof/facade contact-shadow
-            // course in the authored top-down tile, not vertical wall art.
-            // Starting at the south half keeps that shadow on the horizontal
-            // roof plane instead of turning it into detached black feet.
-            wallStartCourse = wallTop * 2 + 1;
+            // The north half of a multi-row facade's top row is the
+            // roof/facade contact-shadow course in the authored top-down
+            // tile, not vertical wall art. Starting at the south half keeps
+            // that shadow on the horizontal roof plane instead of turning it
+            // into detached black feet. A 1-row facade IS the storefront:
+            // door, sign, and window art fill the whole entrance metatile,
+            // so both of its courses stand as wall and the roof flood seeds
+            // from the solid cap row above instead.
+            wallStartCourse = wallTop == y ? wallTop * 2 : wallTop * 2 + 1;
             wallEndCourse = y * 2 + 2;
             spanStartCourse = spanStart * 2;
             spanEndCourse = (spanEnd + 1) * 2;

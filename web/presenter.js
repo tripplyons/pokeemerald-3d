@@ -1421,6 +1421,7 @@ class WebGpuPresenter {
     for (const component of components.values()) {
       const wallCells = component.wallCells.map(([tx, ty]) => [tx, ty]);
       const roofColor = selectRoofColor(component.roofCells, [0.45, 0.45, 0.48]);
+      component.roofMaterial = roofColor;
       component.sideMaterial = selectSideColor(wallCells, roofColor, roofColor);
       component.wallBody = selectWallBodyColor(wallCells, component.sideMaterial);
     }
@@ -1449,7 +1450,19 @@ class WebGpuPresenter {
         const maxOffset = Math.max(...group.cells.map(([, , offset]) => offset));
         if (!Number.isFinite(component.roofHeight))
           top = Math.max(top, component.base + (maxOffset + 1) * TILE_SIZE);
-        const z = worldZ(group.anchorY);
+        // The wall art's base line is the south edge of the group's bottom
+        // source row — where the 2D building meets walkable ground. For a
+        // roofed box the physical plane stands there; anchoring it at the
+        // top course's north edge instead recesses the front by the whole
+        // wall footprint depth. Unroofed sheets (fronts embedded in flat
+        // obstacle art like Fortree tree houses) stay at their anchor so
+        // they remain attached to the authored art around them.
+        const roofed = Number.isFinite(component.roofHeight);
+        const frontTy = roofed
+          ? Math.max(...group.cells.map(([, ty]) => ty)) + 1
+          : group.anchorY;
+        const z = worldZ(frontTy);
+        const columns = new Map();
         for (const [tx, ty, offset] of group.cells) {
           const courseTop = top - offset * TILE_SIZE;
           const courseBottom = courseTop - TILE_SIZE;
@@ -1460,6 +1473,45 @@ class WebGpuPresenter {
             [worldX(tx),courseTop,z,textureU(tx),textureV(ty)],
             [0, 0, 1], HD2D_SURFACE_WALL, 1, component.base, side,
           );
+          const column = columns.get(tx);
+          if (!column || ty < column.ty)
+            columns.set(tx, { ty, courseTop });
+        }
+        // Standing the facade at the front opens the strip above its source
+        // rows. Cap it flush with the roof plane by continuing the eave
+        // course that already borders the wall top: repeating that authored
+        // course keeps roof material and shading without stretching or
+        // duplicating one-off art like signs, which live in wall courses.
+        for (const [tx, column] of columns) {
+          if (column.ty >= frontTy) continue;
+          const backZ = worldZ(column.ty);
+          if (inGrid(tx, column.ty - 1)
+              && surfaceAt(tx, column.ty - 1) === HD2D_SURFACE_ROOF
+              && componentAt(tx, column.ty - 1) === component.id) {
+            const v0 = textureV(column.ty - 1);
+            const v1 = textureV(column.ty);
+            for (let ty = column.ty; ty < frontTy; ty++) {
+              quad(
+                [worldX(tx), column.courseTop, worldZ(ty), textureU(tx), v0],
+                [worldX(tx + 1), column.courseTop, worldZ(ty), textureU(tx + 1), v0],
+                [worldX(tx + 1), column.courseTop, worldZ(ty + 1), textureU(tx + 1), v1],
+                [worldX(tx), column.courseTop, worldZ(ty + 1), textureU(tx), v1],
+                [0, 1, 0], HD2D_SURFACE_ROOF, 1, component.base,
+              );
+            }
+          }
+          for (const dx of [-1, 1]) {
+            if (columns.has(tx + dx)) continue;
+            const x = worldX(dx < 0 ? tx : tx + 1);
+            quad(
+              [x, component.base, dx < 0 ? z : backZ, textureU(tx), textureV(column.ty)],
+              [x, component.base, dx < 0 ? backZ : z, textureU(tx), textureV(column.ty)],
+              [x, column.courseTop, dx < 0 ? backZ : z, textureU(tx), textureV(column.ty)],
+              [x, column.courseTop, dx < 0 ? z : backZ, textureU(tx), textureV(column.ty)],
+              [dx, 0, 0], MATERIAL_NEUTRAL_BUILDING, 1, component.base,
+              component.sideMaterial || side,
+            );
+          }
         }
       }
       component.roofHeight = Math.max(component.roofHeight, top);
