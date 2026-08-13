@@ -2004,6 +2004,30 @@ static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
     return TRUE;
 }
 
+static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols)
+{
+    u32 probe = index;
+
+    // Prop stacks (market shelves, plant boxes, crates, tall trees) satisfy
+    // facade support just like a wall-with-door column, but they are plain
+    // collision art from plaza to open sky. Genuine facade columns carry
+    // covered, door, or warp art somewhere in their collision run.
+    while (probe >= sampleCols)
+    {
+        if (!sHdMapSamples[probe].valid)
+            return FALSE;
+        if (HdMapSampleIsDoorCourse(probe)
+         || HdMapSampleIsCoveredCourse(probe)
+         || sHdMapSamples[probe].hasWarpEntrance)
+            return FALSE;
+        if (!sHdMapSamples[probe - sampleCols].valid
+         || !sHdMapSamples[probe - sampleCols].collision)
+            return TRUE;
+        probe -= sampleCols;
+    }
+    return FALSE;
+}
+
 static bool8 HdMapSampleIsDirectTerrainCourse(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
@@ -2844,6 +2868,30 @@ static void HdClaimBuildingCourse(u32 courseX, u32 courseY, u32 courseCols,
     }
 }
 
+static bool8 HdCourseColumnSupportsRoofClaim(u32 courseX, u32 courseY,
+                                             u32 courseCols, u32 sampleCols,
+                                             u32 sampleRows)
+{
+    const u32 sampleX = courseX / 2;
+    const u32 sampleY = courseY / 2;
+    const u32 sample = sampleY * sampleCols + sampleX;
+    u32 southCourse;
+
+    // A roof course over open ground is an authored overhang. A roof course
+    // over a facade body must sit on mass that actually joined a building:
+    // stacked prop columns (shelves, tall trees) are their own support and
+    // never become part of the neighboring building's roof.
+    if (!HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows))
+        return TRUE;
+    if (sampleY + 1 >= sampleRows)
+        return TRUE;
+    southCourse = ((sampleY + 1) * 2) * courseCols + sampleX * 2;
+    return sHdCourseBuilding[southCourse] >= 0
+        || sHdCourseBuilding[southCourse + 1] >= 0
+        || sHdCourseBuilding[southCourse + courseCols] >= 0
+        || sHdCourseBuilding[southCourse + courseCols + 1] >= 0;
+}
+
 static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
                                 u32 spanEnd, u32 sampleCols, u32 sampleRows,
                                 u32 courseCols, const struct HdBuildingBounds *bounds)
@@ -2873,6 +2921,9 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
         const s32 nextX[3] = {(s32)courseX - 1, (s32)courseX + 1, (s32)courseX};
         const s32 nextY[3] = {(s32)courseY, (s32)courseY, (s32)courseY - 1};
 
+        if (!HdCourseColumnSupportsRoofClaim(courseX, courseY, courseCols,
+                                             sampleCols, sampleRows))
+            continue;
         HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_ROOF);
         if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
             sHdBuildings[building].isClipped = TRUE;
@@ -2918,6 +2969,7 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             u32 coreEnd;
             u32 spanStart;
             u32 spanEnd;
+            u32 advanceX;
             u32 wallTop;
             u32 wallStartCourse;
             u32 wallEndCourse;
@@ -2947,6 +2999,16 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             while (spanEnd + 1 < sampleCols
                 && HdMapSampleHasFacadeSupport(y * sampleCols + spanEnd + 1, sampleCols, sampleRows))
                 spanEnd++;
+            advanceX = spanEnd + 1;
+            // Free-standing prop columns at the span edge satisfy facade
+            // support but belong to the plaza, not the wall sheet. Trimming
+            // them keeps shelves and trees out of the building shell.
+            while (spanStart < spanEnd
+                && HdMapSampleIsPropColumn(y * sampleCols + spanStart, sampleCols))
+                spanStart++;
+            while (spanEnd > spanStart
+                && HdMapSampleIsPropColumn(y * sampleCols + spanEnd, sampleCols))
+                spanEnd--;
 
             wallTop = y;
             while (wallTop > 1 && y - wallTop < HD2D_GEOMETRY_RADIUS
@@ -2976,12 +3038,12 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             }
             if (sHdBuildingCount >= ARRAY_COUNT(sHdBuildings) || roofHeight > 127)
             {
-                x = spanEnd + 1;
+                x = advanceX;
                 continue;
             }
             if (!hasEntrance)
             {
-                x = spanEnd + 1;
+                x = advanceX;
                 continue;
             }
 
@@ -3000,6 +3062,11 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                 {
                     if (HdCourseIsRoofArt(courseX, courseY, sampleCols, sampleRows))
                         continue;
+                    // Prop stacks standing inside a recessed span (courtyard
+                    // shelves, planters) support the row contract but are
+                    // plaza furniture, not wall sheet.
+                    if (HdMapSampleIsPropColumn(y * sampleCols + courseX / 2, sampleCols))
+                        continue;
                     HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
                     if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
                         sHdBuildings[building].isClipped = TRUE;
@@ -3010,7 +3077,7 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                                     spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
             HdFloodBuildingRoof(building, wallStartCourse, spanStartCourse,
                                 spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
-            x = spanEnd + 1;
+            x = advanceX;
         }
     }
 }
