@@ -1869,11 +1869,14 @@ static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
      && HdMapSampleIsStructuralMaterial(sample - sampleCols))
     {
         // A COVERED course pinched between a decorative roof sheet above and
-        // a covered/door facade below is the sloped transition of the cap
-        // (recessed storefronts). Peel its upper 8px into the roof so the
-        // flood can bridge onto the flat cap rows. Cottage bodies keep
-        // NORMAL or COVERED art above and stay wall.
-        return (courseY & 1) == 0;
+        // a covered/door facade below is the closing transition of the cap
+        // (recessed storefronts, canopy kiosks): panel borders and front
+        // eave arcs authored in 3/4 view. The whole row is cap art — the
+        // vertical facade is the covered/door row beneath it — so the roof
+        // keeps its closing border when stretched to the front line.
+        // Cottage bodies keep NORMAL or COVERED art above (their roof rows
+        // are baked sheets, not decorative overlays) and stay wall.
+        return TRUE;
     }
     if (HdMapSampleIsSolidRoofSheet(sample, sampleCols, sampleRows))
         return TRUE;
