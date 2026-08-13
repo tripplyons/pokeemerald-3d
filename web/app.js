@@ -146,6 +146,7 @@ let worldHeightPixels;
 let worldGroundHeightPixels;
 let worldGeometryPixels;
 let worldReceiverPixels;
+let worldFacadePixels;
 let layerPixels;
 let objectIds;
 let bgPriorities;
@@ -912,6 +913,11 @@ function refreshFrameImage() {
     instance.exports.WasmWorldReceiverBuffer(),
     instance.exports.WasmWorldReceiverBufferSize() / 2,
   );
+  worldFacadePixels = new Uint32Array(
+    memory.buffer,
+    instance.exports.WasmWorldFacadeBuffer(),
+    instance.exports.WasmWorldFacadeBufferSize() / 4,
+  );
   layerPixels = new Uint8Array(
     memory.buffer,
     instance.exports.WasmDisplayLayerBuffer(),
@@ -975,6 +981,7 @@ function render() {
     worldGroundHeightPixels,
     worldGeometryPixels,
     worldReceiverPixels,
+    worldFacadePixels,
     worldGridOffsetX: instance.exports.WasmWorldGridOffsetX(),
     worldGridOffsetY: instance.exports.WasmWorldGridOffsetY(),
     worldPixelOriginX: instance.exports.WasmWorldPixelOriginX(),
@@ -1691,6 +1698,7 @@ function automationHd2dCourses(radius = 12) {
   const grounds = new Int8Array(memory.buffer, instance.exports.WasmWorldGroundHeightBuffer(), instance.exports.WasmWorldGroundHeightBufferSize());
   const geometry = new Uint16Array(memory.buffer, instance.exports.WasmWorldGeometryBuffer(), instance.exports.WasmWorldGeometryBufferSize() / 2);
   const receivers = new Uint16Array(memory.buffer, instance.exports.WasmWorldReceiverBuffer(), instance.exports.WasmWorldReceiverBufferSize() / 2);
+  const facades = new Uint32Array(memory.buffer, instance.exports.WasmWorldFacadeBuffer(), instance.exports.WasmWorldFacadeBufferSize() / 4);
   const cx = Math.floor(worldWidth / 2);
   const cy = Math.floor(worldHeight / 2);
   const gridOffsetX = instance.exports.WasmWorldGridOffsetX();
@@ -1720,6 +1728,7 @@ function automationHd2dCourses(radius = 12) {
         g: grounds[i],
         geo: geometry[i],
         receiver: receivers[i],
+        facade: facades[i],
       });
     }
     rows.push(row);

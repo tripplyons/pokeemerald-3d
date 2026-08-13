@@ -137,6 +137,7 @@ static s8 sWasmWorldHeightData[HD2D_WORLD_PIXELS];
 static s8 sWasmWorldGroundHeightData[HD2D_WORLD_PIXELS];
 static u16 sWasmWorldGeometryData[HD2D_WORLD_PIXELS];
 static u16 sWasmWorldReceiverData[HD2D_WORLD_PIXELS];
+static u32 sWasmWorldFacadeData[HD2D_WORLD_PIXELS];
 static s32 sWasmWorldPixelOriginX;
 static s32 sWasmWorldPixelOriginY;
 static u8 sWasmObjectRgba[DISPLAY_PIXELS * RGBA_CHANNELS];
@@ -968,7 +969,9 @@ static s8 sHdCourseGroundHeights[HD2D_COURSE_COUNT];
 static u16 sHdCourseGeometry[HD2D_COURSE_COUNT];
 static u16 sHdCourseReceivers[HD2D_COURSE_COUNT];
 static s16 sHdCourseBuilding[HD2D_COURSE_COUNT];
+static s16 sHdCourseFacade[HD2D_COURSE_COUNT];
 static u8 sHdCourseBuildingKind[HD2D_COURSE_COUNT];
+static u32 sHdCourseFacadeData[HD2D_COURSE_COUNT];
 static u16 sHdCourseVisit[HD2D_COURSE_COUNT];
 static u16 sHdCourseQueue[HD2D_COURSE_COUNT];
 
@@ -1034,6 +1037,7 @@ struct HdBuildingCandidate
 {
     u16 parent;
     u16 componentId;
+    u16 facadeAnchorCourseY;
     s8 baseHeight;
     s8 roofHeight;
     bool8 hasEntrance;
@@ -2828,11 +2832,15 @@ static void HdClaimBuildingCourse(u32 courseX, u32 courseY, u32 courseCols,
     {
         HdUnionBuildingRoots(building, owner);
         sHdCourseBuildingKind[course] |= kind;
+        if ((kind & HD_BUILDING_WALL) && sHdCourseFacade[course] < 0)
+            sHdCourseFacade[course] = building;
     }
     else if (owner < 0)
     {
         sHdCourseBuilding[course] = building;
         sHdCourseBuildingKind[course] = kind;
+        if (kind & HD_BUILDING_WALL)
+            sHdCourseFacade[course] = building;
     }
 }
 
@@ -2979,6 +2987,7 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             building = sHdBuildingCount++;
             sHdBuildings[building].parent = building;
             sHdBuildings[building].componentId = 0;
+            sHdBuildings[building].facadeAnchorCourseY = wallStartCourse;
             sHdBuildings[building].baseHeight = sHdCourseGroundHeights[supportCourse];
             sHdBuildings[building].roofHeight = roofHeight;
             sHdBuildings[building].hasEntrance = TRUE;
@@ -3047,6 +3056,18 @@ static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
         sHdCourseGroundHeights[course] = sHdBuildings[root].baseHeight;
         sHdCourseHeights[course] = surface == HD_SURFACE_ROOF
             ? sHdBuildings[root].roofHeight : sHdBuildings[root].baseHeight;
+        if (surface == HD_SURFACE_WALL && sHdCourseFacade[course] >= 0)
+        {
+            const u16 facade = sHdCourseFacade[course];
+
+            if (HdFindBuildingRoot(facade) == root)
+            {
+                const u32 courseY = course / courseCols;
+                const u32 rowOffset = courseY - sHdBuildings[facade].facadeAnchorCourseY;
+
+                sHdCourseFacadeData[course] = (rowOffset << 16) | (facade + 1);
+            }
+        }
     }
 }
 
@@ -3328,7 +3349,9 @@ static void RenderHd2dWorld(u16 dispcnt)
                 sHdCourseGroundHeights[course] = height;
                 sHdCourseReceivers[course] = 0;
                 sHdCourseBuilding[course] = -1;
+                sHdCourseFacade[course] = -1;
                 sHdCourseBuildingKind[course] = 0;
+                sHdCourseFacadeData[course] = 0;
                 sHdCourseVisit[course] = 0;
             }
         }
@@ -3405,6 +3428,7 @@ static void RenderHd2dWorld(u16 dispcnt)
             sWasmWorldGroundHeightData[pixel] = sHdCourseGroundHeights[courseIndex];
             sWasmWorldGeometryData[pixel] = sHdCourseGeometry[courseIndex];
             sWasmWorldReceiverData[pixel] = sHdCourseReceivers[courseIndex];
+            sWasmWorldFacadeData[pixel] = sHdCourseFacadeData[courseIndex];
         }
     }
 }
@@ -3647,6 +3671,16 @@ u16 *WasmWorldReceiverBuffer(void)
 u32 WasmWorldReceiverBufferSize(void)
 {
     return sizeof(sWasmWorldReceiverData);
+}
+
+u32 *WasmWorldFacadeBuffer(void)
+{
+    return sWasmWorldFacadeData;
+}
+
+u32 WasmWorldFacadeBufferSize(void)
+{
+    return sizeof(sWasmWorldFacadeData);
 }
 
 u8 *WasmDisplayLayerBuffer(void)

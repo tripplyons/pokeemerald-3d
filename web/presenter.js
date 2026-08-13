@@ -274,12 +274,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
       discard;
     }
     if (input.material == 5u && structuralAlpha < 0.5) {
-      // 2D facade holes are ground showing through the wall art. In 3D those
-      // pixels are the building shell, not empty space.
-      if (input.neutralColor.x + input.neutralColor.y + input.neutralColor.z <= 0.001) {
-        discard;
-      }
-      base = input.neutralColor;
+      discard;
     } else {
       base = world.rgb;
     }
@@ -664,6 +659,7 @@ class WebGpuPresenter {
     this.tileGroundHeights = new Float32Array(terrainTileCapacity);
     this.tileGeometry = new Uint16Array(terrainTileCapacity);
     this.tileReceivers = new Uint16Array(terrainTileCapacity);
+    this.tileFacades = new Uint32Array(terrainTileCapacity);
     this.terrainCols = 0;
     this.terrainRows = 0;
     this.terrainOriginX = 0;
@@ -948,7 +944,7 @@ class WebGpuPresenter {
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
   }
 
-  buildTerrain(worldHeights, worldGroundHeights, worldGeometry, worldReceivers, worldPixels,
+  buildTerrain(worldHeights, worldGroundHeights, worldGeometry, worldReceivers, worldFacades, worldPixels,
                worldStructuralAlphaPixels,
                gridOffsetX, gridOffsetY) {
     const originX = gridOffsetX - TILE_SIZE;
@@ -966,6 +962,7 @@ class WebGpuPresenter {
     const groundHeights = this.tileGroundHeights;
     const geometry = this.tileGeometry;
     const receivers = this.tileReceivers;
+    const facades = this.tileFacades;
     let signature = 2166136261;
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
@@ -977,18 +974,21 @@ class WebGpuPresenter {
         const groundHeight = worldGroundHeights[source];
         const geometryWord = worldGeometry[source];
         const receiverWord = worldReceivers[source];
+        const facadeWord = worldFacades[source];
         if (unchanged && (heights[tile] !== height
             || groundHeights[tile] !== groundHeight || geometry[tile] !== geometryWord
-            || receivers[tile] !== receiverWord))
+            || receivers[tile] !== receiverWord || facades[tile] !== facadeWord))
           unchanged = false;
         heights[tile] = height;
         groundHeights[tile] = groundHeight;
         geometry[tile] = geometryWord;
         receivers[tile] = receiverWord;
+        facades[tile] = facadeWord;
         signature = Math.imul(signature ^ (height & 0xff), 16777619);
         signature = Math.imul(signature ^ (groundHeight & 0xff), 16777619);
         signature = Math.imul(signature ^ geometryWord, 16777619);
         signature = Math.imul(signature ^ receiverWord, 16777619);
+        signature = Math.imul(signature ^ facadeWord, 16777619);
       }
     }
     signature >>>= 0;
@@ -1011,6 +1011,7 @@ class WebGpuPresenter {
     const heightAt = (x, y) => inGrid(x, y) ? heights[y * cols + x] : 0;
     const geometryAt = (x, y) => inGrid(x, y) ? geometry[y * cols + x] : 0;
     const receiverAt = (x, y) => inGrid(x, y) ? receivers[y * cols + x] : 0;
+    const facadeAt = (x, y) => inGrid(x, y) ? facades[y * cols + x] : 0;
     const surfaceAt = (x, y) => geometryAt(x, y) & HD2D_SURFACE_MASK;
     const componentAt = (x, y) => geometryAt(x, y) >> HD2D_COMPONENT_SHIFT;
     const worldX = (x) => originX + x * TILE_SIZE - halfW;
@@ -1401,30 +1402,33 @@ class WebGpuPresenter {
       component.wallBody = selectWallBodyColor(wallCells, component.sideMaterial);
     }
     for (const component of components.values()) {
-      const pending = new Set(component.wallCells.map(([tx, ty]) => `${tx},${ty}`));
+      const groups = new Map();
+      for (const [tx, ty] of component.wallCells) {
+        // C preserves the facade candidate that authored this course. A
+        // component can contain several candidates after roof unioning, and
+        // transparent art can disconnect one candidate's source cells, so
+        // browser-side connectivity cannot recover the physical wall plane.
+        const word = facadeAt(tx, ty);
+        const id = word & 0xffff;
+        const offset = word >>> 16;
+        if (!id) continue;
+        let group = groups.get(id);
+        if (!group) {
+          group = { anchorY: ty - offset, cells: [] };
+          groups.set(id, group);
+        }
+        group.cells.push([tx, ty, offset]);
+      }
       let top = component.roofHeight;
       if (!Number.isFinite(top)) top = component.base + TILE_SIZE;
       const side = component.wallBody || component.sideMaterial || [0, 0, 0];
-      while (pending.size) {
-        const firstKey = pending.values().next().value;
-        pending.delete(firstKey);
-        const [seedX, seedY] = firstKey.split(',').map(Number);
-        const cluster = [[seedX, seedY]];
-        for (let index = 0; index < cluster.length; index++) {
-          const [x, y] = cluster[index];
-          for (const [dx, dy] of [[-1,0], [1,0], [0,-1], [0,1]]) {
-            const key = `${x + dx},${y + dy}`;
-            if (!pending.delete(key)) continue;
-            cluster.push([x + dx, y + dy]);
-          }
-        }
-        const firstRow = Math.min(...cluster.map(([, ty]) => ty));
-        const lastRow = Math.max(...cluster.map(([, ty]) => ty));
+      for (const group of groups.values()) {
+        const maxOffset = Math.max(...group.cells.map(([, , offset]) => offset));
         if (!Number.isFinite(component.roofHeight))
-          top = Math.max(top, component.base + (lastRow - firstRow + 1) * TILE_SIZE);
-        const z = worldZ(firstRow);
-        for (const [tx, ty] of cluster) {
-          const courseTop = top - (ty - firstRow) * TILE_SIZE;
+          top = Math.max(top, component.base + (maxOffset + 1) * TILE_SIZE);
+        const z = worldZ(group.anchorY);
+        for (const [tx, ty, offset] of group.cells) {
+          const courseTop = top - offset * TILE_SIZE;
           const courseBottom = courseTop - TILE_SIZE;
           quad(
             [worldX(tx),courseBottom,z,textureU(tx),textureV(ty + 1)],
@@ -1783,14 +1787,14 @@ class WebGpuPresenter {
     );
   }
 
-  present({ finalPixels, worldPixels, worldStructuralAlphaPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldReceiverPixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom, optics }) {
+  present({ finalPixels, worldPixels, worldStructuralAlphaPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldReceiverPixels, worldFacadePixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom, optics }) {
     const encoder = this.device.createCommandEncoder({ label: 'pokeemerald frame encoder' });
     let presentBindGroup = this.finalBindGroup;
     if (enhanced) {
       this.writeTexture(this.worldTexture, worldPixels, this.worldWidth, this.worldHeight);
       this.writeTexture(this.structuralAlphaTexture, worldStructuralAlphaPixels, this.worldWidth, this.worldHeight, 1);
       const vertexCount = this.buildTerrain(
-        worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldReceiverPixels, worldPixels,
+        worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldReceiverPixels, worldFacadePixels, worldPixels,
         worldStructuralAlphaPixels,
         worldGridOffsetX, worldGridOffsetY,
       );
