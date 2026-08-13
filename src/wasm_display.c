@@ -1503,12 +1503,26 @@ static bool8 HdMapSampleMatchesWalkableFront(u32 index, u32 sampleCols, u32 samp
 
 static bool8 HdMapSampleIsFloorSurface(u32 index, u32 sampleCols, u32 sampleRows)
 {
+    const u32 sampleY = index / sampleCols;
+    const u32 north = index - sampleCols;
+
     // Walkable floor art is a floor even when a collision copy sits inside a
     // building footprint or a covered porch uses the same painting as the
     // deck in front.
     // Authored doors keep their own walkable painting, so matching that
     // painting as floor art would flatten every cottage and house entrance.
+    // COVERED collision posts under more house collision share porch art
+    // and must stay in the facade span.
     if (HdMapSampleIsDoorCourse(index))
+        return FALSE;
+    if (sHdMapSamples[index].collision
+     && HdMapSampleIsCoveredCourse(index)
+     && sampleY > 0
+     && sHdMapSamples[north].valid
+     && sHdMapSamples[north].collision
+     && HdMapSampleIsStructuralMaterial(north)
+     && HdMapSampleHasVisibleArt(north)
+     && !HdMapSampleIsDoorCourse(north))
         return FALSE;
     return HdMapSampleIsWalkableFloorArt(index)
         || HdMapSampleMatchesWalkableFront(index, sampleCols, sampleRows);
@@ -1613,11 +1627,15 @@ static bool8 HdMapSampleIsSolidRoofSheet(u32 index, u32 sampleCols, u32 sampleRo
         return FALSE;
     if (HdMapSampleIsCoveredCourse(index))
     {
-        // Dedicated COVERED roof rows sit above the facade. A 1-row MART/PC
-        // tile is only a cap when nothing above already owns the roof.
-        if (!HdMapSampleHasFacadeSupport(index, sampleCols, sampleRows))
-            return TRUE;
-        return !massAbove;
+        const u32 south = sampleY + 1 < sampleRows
+            ? index + sampleCols : index;
+
+        // 1-row MART/PC tiles are both facade and roof. Stacked COVERED
+        // cottage posts sit on another COVERED course and stay wall.
+        if (HdMapSampleHasFacadeSupport(index, sampleCols, sampleRows))
+            return !massAbove;
+        return HdMapSampleSitsOnFacade(index, sampleCols, sampleRows)
+            && !HdMapSampleIsCoveredCourse(south);
     }
     // Solid caps paint the same sheet on both planes, or only plane 0.
     // Window and gable rows overlay different top-plane house art.
@@ -1640,16 +1658,25 @@ static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
      || !sHdMapSamples[sample].collision
      || !HdMapSampleIsStructuralMaterial(sample)
      || HdMapSampleIsFloorSurface(sample, sampleCols, sampleRows)
-     || HdMapSampleIsDoorCourse(sample)
-     || HdMapSampleIsFoliageArt(sample))
+     || HdMapSampleIsDoorCourse(sample))
         return FALSE;
+    if (HdMapSampleIsFoliageArt(sample))
+    {
+        // Leafy house caps sit on a NORMAL gable row. Green posts on a
+        // COVERED/door facade stay wall, and hedges on fences stay ground.
+        return HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows)
+            && !HdMapSampleIsCoveredCourse(south)
+            && !HdMapSampleIsDoorCourse(south);
+    }
     if (HdMapSampleIsCoveredCourse(sample)
      && HdMapSampleHasFacadeSupport(sample, sampleCols, sampleRows)
+     && !HdMapSampleIsCoveredCourse(south)
      && HdMapSampleIsBuildingMass(sampleY > 0 ? sample - sampleCols : sample,
                                   sampleCols, sampleRows))
     {
         // 1-row MART/PC tiles are both facade and roof. Keep the lower 8px
-        // as wall and peel the upper 8px as the cap.
+        // as wall and peel the upper 8px as the cap. COVERED cottage posts
+        // sit on another COVERED course and stay wall.
         return (courseY & 1) == 0;
     }
     if (HdMapSampleIsSolidRoofSheet(sample, sampleCols, sampleRows))
@@ -1666,10 +1693,11 @@ static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
       || (sampleX + 1 < sampleCols
        && HdMapSampleIsSolidRoofSheet(sample + 1, sampleCols, sampleRows))))
         return TRUE;
-    // Same-width MART/PC window rows sit on the door/COVERED facade. They
-    // are the authored roof sheet, not a second cardboard wall.
+    // Same-width MART/PC window rows are NORMAL art on a COVERED facade.
+    // COVERED cottage posts sit on another COVERED post and stay wall.
     return HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows)
-        && (HdMapSampleIsDoorCourse(south) || HdMapSampleIsCoveredCourse(south));
+        && HdMapSampleIsCoveredCourse(south)
+        && !HdMapSampleIsCoveredCourse(sample);
 }
 
 static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
@@ -1730,35 +1758,32 @@ static bool8 HdMapSampleIsFacadeStackCourse(u32 index, u32 sampleCols, u32 sampl
 {
     // Rows above a door are often normal-layer house art (windows, gable),
     // not COVERED. They are more of the same 2D facade stack, not obstacles.
-    // Same-width MART/PC caps and Fortree roof overlays stay horizontal.
-    return sHdMapSamples[index].valid
-        && sHdMapSamples[index].collision
-        && HdMapSampleHasVisibleArt(index)
-        && HdMapSampleIsStructuralMaterial(index)
-        && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows)
-        && !HdMapSampleIsDecorativeOverlay(index)
-        && !HdMapSampleIsRoofCapCourse(index, sampleCols, sampleRows);
+    // Same-width MART/PC caps stay horizontal because they are roof art.
+    if (!sHdMapSamples[index].valid
+     || !sHdMapSamples[index].collision
+     || !HdMapSampleHasVisibleArt(index)
+     || !HdMapSampleIsStructuralMaterial(index)
+     || HdMapSampleIsFloorSurface(index, sampleCols, sampleRows)
+     || HdMapSampleIsRoofCapCourse(index, sampleCols, sampleRows))
+        return FALSE;
+    if (!HdMapSampleIsDecorativeOverlay(index))
+        return TRUE;
+    // Cottage gables overlay house art on a ground-colored plane. Keep them
+    // in the wall stack when they sit on the door span.
+    return HdMapSampleSitsOnFacade(index, sampleCols, sampleRows);
 }
 
 static bool8 HdMapRowIsRoofOverhang(u32 row, u32 startX, u32 endX,
                                     u32 sampleCols, u32 sampleRows)
 {
-    // A roof sheet continues past the door span or is already classified as
-    // roof art. House gables stay the same width as the facade and are not
-    // roof art, so they remain stacked wall art.
+    // Only an authored roof-cap row stops the climb. Adjacent house posts
+    // and overlay gables stay in the wall stack even when they sit beside
+    // the door span.
     for (u32 x = startX; x <= endX; x++)
     {
         if (HdMapSampleIsRoofCapCourse(row * sampleCols + x, sampleCols, sampleRows))
             return TRUE;
     }
-    if (startX > 0
-     && HdMapSampleIsFacadeStackCourse(row * sampleCols + startX - 1,
-                                       sampleCols, sampleRows))
-        return TRUE;
-    if (endX + 1 < sampleCols
-     && HdMapSampleIsFacadeStackCourse(row * sampleCols + endX + 1,
-                                       sampleCols, sampleRows))
-        return TRUE;
     return FALSE;
 }
 
