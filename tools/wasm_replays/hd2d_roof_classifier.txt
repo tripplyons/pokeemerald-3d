@@ -1,0 +1,15 @@
+# Shared roof/hedge classifier coverage. Avoids the long world tour and
+# checks the screenshot failures: hedge cubes, hollow planter rims, and
+# same-width MART/PC roofs stood up as cardboard.
+120 warp 26 14 3 54
+320 screenshot frontier-pc
+320 probe hd2d-courses 18
+321 warp 26 14 30 48
+521 screenshot frontier-south-building
+521 probe hd2d-courses 18
+522 warp 0 4 5 9
+722 screenshot fortree-buildings
+722 probe hd2d-courses 18
+723 warp 0 5 24 16
+923 screenshot lilycove-pc
+923 probe hd2d-courses 18

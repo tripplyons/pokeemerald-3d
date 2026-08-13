@@ -1465,7 +1465,14 @@ static bool8 HdMapSampleHasTopArt(u32 index)
         && HdMetatileCoverage(&sHdMapSamples[index], 1) != 0;
 }
 
-static bool8 HdCourseHasTopArt(u32 courseX, u32 courseY, u32 sampleCols)
+static bool8 HdMapSampleHasVisibleArt(u32 index)
+{
+    return sHdMapSamples[index].valid
+        && (HdMetatileCoverage(&sHdMapSamples[index], 0)
+          + HdMetatileCoverage(&sHdMapSamples[index], 1) != 0);
+}
+
+static bool8 HdCourseHasVisibleArt(u32 courseX, u32 courseY, u32 sampleCols)
 {
     const u32 sampleX = courseX / 2;
     const u32 sampleY = courseY / 2;
@@ -1473,10 +1480,14 @@ static bool8 HdCourseHasTopArt(u32 courseX, u32 courseY, u32 sampleCols)
     const u8 quadrant = (courseY & 1) * 2 + (courseX & 1);
 
     return sHdMapSamples[sample].valid
-        && HdMetatileQuadrantCoverage(&sHdMapSamples[sample], 1, quadrant) != 0;
+        && (HdMetatileQuadrantCoverage(&sHdMapSamples[sample], 0, quadrant)
+          + HdMetatileQuadrantCoverage(&sHdMapSamples[sample], 1, quadrant) != 0);
 }
 
 static bool8 HdMapSampleIsWalkableFloorArt(u32 index);
+static bool8 HdMapSamplePlane0IsFloorArt(u32 index);
+static bool8 HdMapSampleIsFoliageArt(u32 index);
+static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRows);
 
 static bool8 HdMapSampleMatchesWalkableFront(u32 index, u32 sampleCols, u32 sampleRows)
 {
@@ -1498,23 +1509,85 @@ static bool8 HdMapSampleIsFloorSurface(u32 index, u32 sampleCols, u32 sampleRows
         || HdMapSampleMatchesWalkableFront(index, sampleCols, sampleRows);
 }
 
+static bool8 HdMapSampleIsDecorativeOverlay(u32 index)
+{
+    // Hedges, planter rims, and some roof sheets paint the top plane over a
+    // walkable ground underlay. Foliage stays decoration; roof-colored
+    // sheets can still cap a facade.
+    return HdMapSampleHasTopArt(index)
+        && !HdMapSampleIsDoorCourse(index)
+        && !HdMapSampleIsCoveredCourse(index)
+        && HdMapSamplePlane0IsFloorArt(index);
+}
+
+static bool8 HdMapSampleIsFacadeBody(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    return sHdMapSamples[index].valid
+        && HdMapSampleIsStructuralMaterial(index)
+        && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows)
+        && !HdMapSampleIsDecorativeOverlay(index)
+        && (HdMapSampleIsDoorCourse(index)
+         || HdMapSampleIsCoveredCourse(index)
+         || (sHdMapSamples[index].collision && HdMapSampleHasVisibleArt(index)));
+}
+
+static bool8 HdMapSampleIsBuildingMass(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    const u32 sampleX = index % sampleCols;
+    const u32 sampleY = index / sampleCols;
+
+    if (!sHdMapSamples[index].valid
+     || !sHdMapSamples[index].collision
+     || !HdMapSampleIsStructuralMaterial(index)
+     || !HdMapSampleHasVisibleArt(index)
+     || HdMapSampleIsFloorSurface(index, sampleCols, sampleRows)
+     || HdMapSampleIsFoliageArt(index))
+        return FALSE;
+    if (!HdMapSampleIsDecorativeOverlay(index))
+        return TRUE;
+    return sampleY + 1 < sampleRows
+        && HdMapSampleIsFacadeBody((sampleY + 1) * sampleCols + sampleX,
+                                   sampleCols, sampleRows);
+}
+
 static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
                                u32 sampleRows)
 {
     const u32 sampleX = courseX / 2;
     const u32 sampleY = courseY / 2;
     const u32 sample = sampleY * sampleCols + sampleX;
+    const bool8 onFacade = sampleY + 1 < sampleRows
+        && HdMapSampleIsFacadeBody((sampleY + 1) * sampleCols + sampleX,
+                                   sampleCols, sampleRows);
+    const bool8 massAbove = sampleY > 0
+        && HdMapSampleIsBuildingMass((sampleY - 1) * sampleCols + sampleX,
+                                     sampleCols, sampleRows);
 
-    // Landmark roofs are collision top-art sheets, not only the one row
-    // sitting on a COVERED/door tile. Door and covered courses stay facade.
-    if (!HdCourseHasTopArt(courseX, courseY, sampleCols)
+    // Landmark roofs are authored caps on a facade. Collision top-art also
+    // covers hedges and planter rims; green overlays stay on the ground.
+    if (!HdCourseHasVisibleArt(courseX, courseY, sampleCols)
      || !sHdMapSamples[sample].collision
      || !HdMapSampleIsStructuralMaterial(sample)
      || HdMapSampleIsFloorSurface(sample, sampleCols, sampleRows)
      || HdMapSampleIsDoorCourse(sample)
-     || HdMapSampleIsCoveredCourse(sample))
+     || HdMapSampleIsFoliageArt(sample))
         return FALSE;
-    return TRUE;
+    if (HdMapSampleIsCoveredCourse(sample))
+    {
+        // Dedicated COVERED roof rows sit above the facade. 1-row MART/PC
+        // tiles are both facade and roof, so only their upper 8px is a cap.
+        if (!HdMapSampleHasFacadeSupport(sample, sampleCols, sampleRows))
+            return TRUE;
+        return !massAbove && (courseY & 1) == 0;
+    }
+    if (!onFacade)
+        return FALSE;
+    // Fortree roof sheets are plaza overlays on a facade. Plane-0-only
+    // MART/PC caps have no top-plane art. Window and gable rows keep that
+    // art and stay in the facade stack.
+    if (HdMapSampleIsDecorativeOverlay(sample))
+        return TRUE;
+    return !HdMapSampleHasTopArt(sample);
 }
 
 static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
@@ -1522,8 +1595,7 @@ static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
     return sHdMapSamples[index].valid
         && sHdMapSamples[index].collision
         && HdMapSampleIsStructuralMaterial(index)
-        && (HdMetatileCoverage(&sHdMapSamples[index], 0)
-          + HdMetatileCoverage(&sHdMapSamples[index], 1) != 0);
+        && HdMapSampleHasVisibleArt(index);
 }
 
 static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRows)
@@ -1552,22 +1624,42 @@ static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols, u32 sampl
          || sHdMapSamples[index].hasWarpEntrance);
 }
 
+static bool8 HdMapSampleIsRoofCapCourse(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    const u32 sampleX = index % sampleCols;
+    const u32 sampleY = index / sampleCols;
+
+    // Only a full roof sheet counts. 1-row COVERED MART/PC tiles keep their
+    // lower 8px as facade, so the metatile itself is not a roof cap.
+    return HdCourseIsRoofArt(sampleX * 2, sampleY * 2 + 1, sampleCols, sampleRows)
+        || HdCourseIsRoofArt(sampleX * 2 + 1, sampleY * 2 + 1, sampleCols, sampleRows);
+}
+
 static bool8 HdMapSampleIsFacadeStackCourse(u32 index, u32 sampleCols, u32 sampleRows)
 {
     // Rows above a door are often normal-layer house art (windows, gable),
     // not COVERED. They are more of the same 2D facade stack, not obstacles.
+    // Same-width MART/PC caps and Fortree roof overlays stay horizontal.
     return sHdMapSamples[index].valid
         && sHdMapSamples[index].collision
-        && HdMapSampleHasTopArt(index)
+        && HdMapSampleHasVisibleArt(index)
         && HdMapSampleIsStructuralMaterial(index)
-        && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows);
+        && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows)
+        && !HdMapSampleIsDecorativeOverlay(index)
+        && !HdMapSampleIsRoofCapCourse(index, sampleCols, sampleRows);
 }
 
 static bool8 HdMapRowIsRoofOverhang(u32 row, u32 startX, u32 endX,
                                     u32 sampleCols, u32 sampleRows)
 {
-    // A roof sheet continues past the door span. House gables stay the
-    // same width as the facade, so they remain stacked wall art.
+    // A roof sheet continues past the door span or is already classified as
+    // roof art. House gables stay the same width as the facade and are not
+    // roof art, so they remain stacked wall art.
+    for (u32 x = startX; x <= endX; x++)
+    {
+        if (HdMapSampleIsRoofCapCourse(row * sampleCols + x, sampleCols, sampleRows))
+            return TRUE;
+    }
     if (startX > 0
      && HdMapSampleIsFacadeStackCourse(row * sampleCols + startX - 1,
                                        sampleCols, sampleRows))
@@ -1996,6 +2088,52 @@ static bool8 HdMapSampleIsWalkableFloorArt(u32 index)
     return FALSE;
 }
 
+static bool8 HdMapSamplePlane0IsFloorArt(u32 index)
+{
+    const struct HdMapSample *sample = &sHdMapSamples[index];
+
+    if (!sample->valid || HdMetatileCoverage(sample, 0) == 0)
+        return FALSE;
+    for (u32 i = 0; i < ARRAY_COUNT(sHdMapSamples); i++)
+    {
+        if (!sHdMapSamples[i].valid || sHdMapSamples[i].collision)
+            continue;
+        if (sHdSampleBaseSurfaces[i] == HD_SURFACE_GROUND
+         && HdMetatilesHaveSamePlaneArt(sample, &sHdMapSamples[i], 0))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static bool8 HdMapSampleIsFoliageArt(u32 index)
+{
+    const struct HdMapSample *sample = &sHdMapSamples[index];
+    const u8 plane = HdMetatileCoverage(sample, 1) != 0 ? 1 : 0;
+    u32 foliage = 0;
+    u32 opaque = 0;
+
+    if (!sample->valid)
+        return FALSE;
+    for (u32 quadrant = 0; quadrant < 4; quadrant++)
+    {
+        for (u32 y = 0; y < HD2D_TILE_WIDTH; y += 2)
+        {
+            for (u32 x = 0; x < HD2D_TILE_WIDTH; x += 2)
+            {
+                struct Rgb color;
+
+                if (!HdMetatilePixel(sample->layout, sample->metatileId, plane,
+                                     quadrant, x, y, &color))
+                    continue;
+                opaque++;
+                if (color.g > color.r + 12 && color.g > color.b + 12)
+                    foliage++;
+            }
+        }
+    }
+    return opaque != 0 && foliage * 2 >= opaque;
+}
+
 static bool8 HdMapSampleIsCliffSeed(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
@@ -2330,10 +2468,8 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
 {
     const u32 minY = seedY > HD2D_GEOMETRY_RADIUS * 2
         ? seedY - HD2D_GEOMETRY_RADIUS * 2 : 0;
-    const u32 minX = spanStart > HD2D_GEOMETRY_RADIUS * 2
-        ? spanStart - HD2D_GEOMETRY_RADIUS * 2 : 0;
-    const u32 maxX = spanEnd + HD2D_GEOMETRY_RADIUS * 2 < courseCols
-        ? spanEnd + HD2D_GEOMETRY_RADIUS * 2 : courseCols;
+    const u32 minX = spanStart > 2 ? spanStart - 2 : 0;
+    const u32 maxX = spanEnd + 2 < courseCols ? spanEnd + 2 : courseCols;
     const u16 visit = building + 1;
     u32 queueStart = 0;
     u32 queueEnd = 0;
@@ -2478,12 +2614,17 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             {
                 for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
                 {
+                    if (HdCourseIsRoofArt(courseX, courseY, sampleCols, sampleRows))
+                        continue;
                     HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
                     if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
                         sHdBuildings[building].isClipped = TRUE;
                 }
             }
-            HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
+            if (wallStartCourse > 0)
+                HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
+                                    spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
+            HdFloodBuildingRoof(building, wallStartCourse, spanStartCourse,
                                 spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
             x = spanEnd + 1;
         }
