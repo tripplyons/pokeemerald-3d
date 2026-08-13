@@ -2953,10 +2953,11 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                 && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows)
                 && !HdMapRowIsRoofOverhang(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows))
                 wallTop--;
-            // Wall ownership includes the COVERED/door row and any stacked
-            // house courses above it. A distinct roof cap, if present, stays
-            // on the row above wallTop and seeds the roof flood.
-            wallStartCourse = wallTop * 2;
+            // The north half of wallTop is the roof/facade contact-shadow
+            // course in the authored top-down tile, not vertical wall art.
+            // Starting at the south half keeps that shadow on the horizontal
+            // roof plane instead of turning it into detached black feet.
+            wallStartCourse = wallTop * 2 + 1;
             wallEndCourse = y * 2 + 2;
             spanStartCourse = spanStart * 2;
             spanEndCourse = (spanEnd + 1) * 2;
