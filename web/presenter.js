@@ -224,6 +224,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 }
 
 const TO_KEY = normalize(vec3f(-0.45, 0.77, -0.45));
+const SURFACE_GROUND = 0u;
 const SURFACE_WATER = 1u;
 const SURFACE_ROOF = 6u;
 const MATERIAL_NEUTRAL_BUILDING = 8u;
@@ -252,6 +253,7 @@ fn structuralVisibility(position: vec3f, normal: vec3f) -> f32 {
 struct FragmentOutput {
   @location(0) color: vec4f,
   @location(1) focusDepth: f32,
+  @builtin(frag_depth) depth: f32,
 }
 
 @fragment
@@ -292,6 +294,11 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
   var output: FragmentOutput;
   output.color = vec4f(base * mix(1.0, illumination, camera.values.z), 1.0);
   output.focusDepth = input.cameraDepth;
+  // Flat receiver art uses the billboard shader's exact per-pixel BG
+  // priority mask for foreground details such as flags. Keeping the opaque
+  // receiver at its projected depth would also hide actors behind the nearby
+  // ground-colored pixels that surround those details.
+  output.depth = select(input.position.z, 0.99999, input.material == SURFACE_GROUND);
   return output;
 }
 `;
