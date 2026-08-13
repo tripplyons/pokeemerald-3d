@@ -33,6 +33,7 @@ extern void WasmApplyTilesetAnimations(const struct Tileset *tileset, u8 *dest, 
 #define HD2D_SAMPLE_COLS (HD2D_WORLD_WIDTH / 16 + HD2D_GEOMETRY_RADIUS * 2 + 2)
 #define HD2D_SAMPLE_ROWS (HD2D_WORLD_HEIGHT / 16 + HD2D_GEOMETRY_RADIUS * 2 + 2)
 #define HD2D_GEOMETRY_CACHE_COUNT 8
+#define HD2D_DECODED_COURSE_CACHE_COUNT 4096
 #define HD2D_GEOMETRY_VALID_BYTES (NUM_METATILES_TOTAL / 8)
 #define HD2D_COURSE_HEIGHT 8
 #define HD2D_COURSE_COLS (HD2D_SAMPLE_COLS * 2)
@@ -971,6 +972,21 @@ static u8 sHdCourseBuildingKind[HD2D_COURSE_COUNT];
 static u16 sHdCourseVisit[HD2D_COURSE_COUNT];
 static u16 sHdCourseQueue[HD2D_COURSE_COUNT];
 
+enum HdSamplePredicate
+{
+    HD_PREDICATE_FLOOR_SURFACE,
+    HD_PREDICATE_DECORATIVE,
+    HD_PREDICATE_FACADE_BODY,
+    HD_PREDICATE_BUILDING_MASS,
+    HD_PREDICATE_SOLID_ROOF,
+    HD_PREDICATE_FACADE_SUPPORT,
+    HD_PREDICATE_CLIFF_SEED,
+    HD_PREDICATE_COUNT,
+};
+
+static u8 sHdSamplePredicateCaches[HD_PREDICATE_COUNT][HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
+static u8 sHdRoofArtCache[HD2D_COURSE_COUNT];
+
 struct HdTilesetCache
 {
     const struct Tileset *tileset;
@@ -979,6 +995,32 @@ struct HdTilesetCache
     u16 palettes[16 * 16];
     u16 displayPalettes[16 * 16];
 };
+
+struct HdDecodedCourseCache
+{
+    const struct MapLayout *layout;
+    u32 generation;
+    u16 metatileId;
+    u8 half;
+    u8 quadrant;
+    u32 pixels[HD2D_TILE_WIDTH * HD2D_TILE_WIDTH];
+};
+
+struct HdArtPredicateCache
+{
+    const struct MapLayout *layout;
+    u32 generation;
+    u16 metatileId;
+    bool8 valid;
+    u8 known;
+    u8 results;
+};
+
+#define HD_ART_PREDICATE_WALKABLE_FLOOR (1 << 0)
+#define HD_ART_PREDICATE_PLANE0_FLOOR   (1 << 1)
+#define HD_ART_PREDICATE_FOLIAGE        (1 << 2)
+#define HD_ART_PREDICATE_EARTH          (1 << 3)
+#define HD_ART_PREDICATE_PLANES_MATCH   (1 << 4)
 
 struct HdGeometryCache
 {
@@ -1014,10 +1056,13 @@ static u16 sHdBuildingCount;
 
 static struct HdTilesetCache sHdTilesetCaches[16];
 static u8 sHdTilesetCacheNext;
+static struct HdDecodedCourseCache sHdDecodedCourseCaches[HD2D_DECODED_COURSE_CACHE_COUNT];
+static struct HdArtPredicateCache sHdArtPredicateCaches[HD2D_DECODED_COURSE_CACHE_COUNT];
+static u32 sHdDecodedCourseGeneration;
 static struct HdGeometryCache sHdGeometryCaches[HD2D_GEOMETRY_CACHE_COUNT];
 static u8 sHdGeometryCacheNext;
 
-static const u8 *HdTilesetPixels(const struct Tileset *tileset)
+static struct HdTilesetCache *HdTilesetCache(const struct Tileset *tileset)
 {
     struct HdTilesetCache *cache = NULL;
     const u32 frame = WasmTilesetAnimationFrame(tileset->isSecondary);
@@ -1074,7 +1119,7 @@ static const u8 *HdTilesetPixels(const struct Tileset *tileset)
                                    cache->displayPalettes, firstFrame, frame);
         cache->animationFrame = frame;
     }
-    return cache->tiles;
+    return cache;
 }
 
 static bool8 HdMapHeaderHasWarpAt(const struct MapHeader *header, s32 x, s32 y)
@@ -1178,20 +1223,19 @@ static bool8 ResolveHdMapSample(s32 mapX, s32 mapY, struct HdMapSample *sample)
 }
 
 
-static bool8 HdMetatilePixel(const struct MapLayout *layout, u16 metatileId, u8 half, u8 quadrant,
-                             u8 x, u8 y, struct Rgb *color)
+static void HdDecodeMetatileCourse(const struct MapLayout *layout, u16 metatileId,
+                                   u8 half, u8 quadrant, u32 *pixels)
 {
     const struct Tileset *tileset;
+    const struct Tileset *paletteTileset;
     const u16 *metatiles;
-    const u8 *tilePixels;
+    u8 tilePixels[32];
+    const u16 *paletteData = NULL;
+    struct HdTilesetCache *tilesetCache;
     u16 localMetatile;
     u16 entry;
     u16 tile;
     u8 palette;
-    u8 px;
-    u8 py;
-    u8 packed;
-    u8 colorIndex;
     bool8 useVram;
 
     if (metatileId >= NUM_METATILES_TOTAL)
@@ -1211,7 +1255,22 @@ static bool8 HdMetatilePixel(const struct MapLayout *layout, u16 metatileId, u8 
     metatiles = tileset->metatiles + localMetatile * NUM_TILES_PER_METATILE;
     entry = metatiles[half * 4 + quadrant];
     if (useVram)
-        return MetatilePixel(entry, x, y, color);
+    {
+        for (u32 y = 0; y < HD2D_TILE_WIDTH; y++)
+        {
+            for (u32 x = 0; x < HD2D_TILE_WIDTH; x++)
+            {
+                struct Rgb color;
+                const u32 pixel = y * HD2D_TILE_WIDTH + x;
+
+                if (MetatilePixel(entry, x, y, &color))
+                    pixels[pixel] = 0xff000000 | color.r | (color.g << 8) | (color.b << 16);
+                else
+                    pixels[pixel] = 0;
+            }
+        }
+        return;
+    }
 
     tile = entry & 0x3ff;
     if (tile < NUM_TILES_IN_PRIMARY)
@@ -1223,41 +1282,102 @@ static bool8 HdMetatilePixel(const struct MapLayout *layout, u16 metatileId, u8 
         tileset = layout->secondaryTileset;
         tile -= NUM_TILES_IN_PRIMARY;
     }
-    tilePixels = HdTilesetPixels(tileset);
-    if (tilePixels == NULL)
-        return FALSE;
+    tilesetCache = HdTilesetCache(tileset);
     if ((!tileset->isSecondary && tile >= NUM_TILES_IN_PRIMARY)
      || (tileset->isSecondary && tile >= NUM_TILES_TOTAL - NUM_TILES_IN_PRIMARY))
-        return FALSE;
-    palette = (entry >> 12) & 15;
-    px = entry & 0x400 ? 7 - x : x;
-    py = entry & 0x800 ? 7 - y : y;
-    packed = tilePixels[tile * 32 + py * 4 + px / 2];
-    colorIndex = px & 1 ? packed >> 4 : packed & 15;
-    if (colorIndex == 0)
-        return FALSE;
-    tileset = palette < NUM_PALS_IN_PRIMARY ? layout->primaryTileset : layout->secondaryTileset;
     {
-        const struct Tileset *activeTileset = palette < NUM_PALS_IN_PRIMARY
-            ? gMapHeader.mapLayout->primaryTileset : gMapHeader.mapLayout->secondaryTileset;
-        if (tileset == activeTileset)
-            *color = GbaColor(ReadU16(BG_PLTT + (palette * 16 + colorIndex) * 2));
-        else
+        for (u32 pixel = 0; pixel < HD2D_TILE_WIDTH * HD2D_TILE_WIDTH; pixel++)
+            pixels[pixel] = 0;
+        return;
+    }
+    for (u32 i = 0; i < ARRAY_COUNT(tilePixels); i++)
+        tilePixels[i] = tilesetCache->tiles[tile * 32 + i];
+    palette = (entry >> 12) & 15;
+    paletteTileset = palette < NUM_PALS_IN_PRIMARY ? layout->primaryTileset : layout->secondaryTileset;
+    if (paletteTileset == (palette < NUM_PALS_IN_PRIMARY
+        ? gMapHeader.mapLayout->primaryTileset : gMapHeader.mapLayout->secondaryTileset))
+        paletteData = Ptr16(BG_PLTT + palette * 16 * sizeof(u16));
+    else
+        paletteData = &HdTilesetCache(paletteTileset)->displayPalettes[palette * 16];
+    for (u32 y = 0; y < HD2D_TILE_WIDTH; y++)
+    {
+        for (u32 x = 0; x < HD2D_TILE_WIDTH; x++)
         {
-            const u16 *paletteData = tileset->palettes[palette];
-            (void)HdTilesetPixels(tileset);
-            for (u32 i = 0; i < ARRAY_COUNT(sHdTilesetCaches); i++)
+            const u8 px = entry & 0x400 ? 7 - x : x;
+            const u8 py = entry & 0x800 ? 7 - y : y;
+            const u8 packed = tilePixels[py * 4 + px / 2];
+            const u8 colorIndex = px & 1 ? packed >> 4 : packed & 15;
+            const u32 pixel = y * HD2D_TILE_WIDTH + x;
+
+            if (colorIndex != 0)
             {
-                if (sHdTilesetCaches[i].tileset == tileset)
-                {
-                    paletteData = &sHdTilesetCaches[i].displayPalettes[palette * 16];
-                    break;
-                }
+                const struct Rgb color = GbaColor(paletteData[colorIndex]);
+                pixels[pixel] = 0xff000000 | color.r | (color.g << 8) | (color.b << 16);
             }
-            *color = GbaColor(paletteData[colorIndex]);
+            else
+                pixels[pixel] = 0;
         }
     }
+}
+
+static const u32 *HdMetatileCourse(const struct MapLayout *layout, u16 metatileId,
+                                   u8 half, u8 quadrant)
+{
+    const u32 hash = ((((u32)layout >> 4) ^ ((u32)metatileId * 33)
+                     ^ (half * 4 + quadrant)) & (HD2D_DECODED_COURSE_CACHE_COUNT - 1));
+    struct HdDecodedCourseCache *cache = &sHdDecodedCourseCaches[hash];
+
+    if (cache->generation != sHdDecodedCourseGeneration
+     || cache->layout != layout
+     || cache->metatileId != metatileId
+     || cache->half != half
+     || cache->quadrant != quadrant)
+    {
+        cache->layout = layout;
+        cache->generation = sHdDecodedCourseGeneration;
+        cache->metatileId = metatileId;
+        cache->half = half;
+        cache->quadrant = quadrant;
+        HdDecodeMetatileCourse(layout, metatileId, half, quadrant, cache->pixels);
+    }
+    return cache->pixels;
+}
+
+static bool8 HdMetatilePixel(const struct MapLayout *layout, u16 metatileId, u8 half, u8 quadrant,
+                             u8 x, u8 y, struct Rgb *color)
+{
+    const u32 packed = HdMetatileCourse(layout, metatileId, half, quadrant)
+        [y * HD2D_TILE_WIDTH + x];
+
+    if ((packed >> 24) == 0)
+        return FALSE;
+    color->r = packed;
+    color->g = packed >> 8;
+    color->b = packed >> 16;
     return TRUE;
+}
+
+static struct HdArtPredicateCache *HdArtPredicateCache(u32 index)
+{
+    const struct HdMapSample *sample = &sHdMapSamples[index];
+    const u32 hash = ((((u32)sample->layout >> 4) ^ ((u32)sample->metatileId * 33)
+                     ^ sample->valid)
+                    & (HD2D_DECODED_COURSE_CACHE_COUNT - 1));
+    struct HdArtPredicateCache *cache = &sHdArtPredicateCaches[hash];
+
+    if (cache->generation != sHdDecodedCourseGeneration
+     || cache->layout != sample->layout
+     || cache->metatileId != sample->metatileId
+     || cache->valid != sample->valid)
+    {
+        cache->layout = sample->layout;
+        cache->generation = sHdDecodedCourseGeneration;
+        cache->metatileId = sample->metatileId;
+        cache->valid = sample->valid;
+        cache->known = 0;
+        cache->results = 0;
+    }
+    return cache;
 }
 
 static u16 HdMetatileAttributes(const struct MapLayout *layout, u16 metatileId)
@@ -1501,7 +1621,7 @@ static bool8 HdMapSampleMatchesWalkableFront(u32 index, u32 sampleCols, u32 samp
     return HdMetatilesHaveSameVisibleArt(&sHdMapSamples[index], &sHdMapSamples[front]);
 }
 
-static bool8 HdMapSampleIsFloorSurface(u32 index, u32 sampleCols, u32 sampleRows)
+static bool8 HdMapSampleIsFloorSurfaceUncached(u32 index, u32 sampleCols, u32 sampleRows)
 {
     const u32 sampleY = index / sampleCols;
     const u32 north = index - sampleCols;
@@ -1528,7 +1648,16 @@ static bool8 HdMapSampleIsFloorSurface(u32 index, u32 sampleCols, u32 sampleRows
         || HdMapSampleMatchesWalkableFront(index, sampleCols, sampleRows);
 }
 
-static bool8 HdMapSampleIsDecorativeOverlay(u32 index)
+static bool8 HdMapSampleIsFloorSurface(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    u8 *cached = &sHdSamplePredicateCaches[HD_PREDICATE_FLOOR_SURFACE][index];
+
+    if (*cached == 0)
+        *cached = HdMapSampleIsFloorSurfaceUncached(index, sampleCols, sampleRows) + 1;
+    return *cached == 2;
+}
+
+static bool8 HdMapSampleIsDecorativeOverlayUncached(u32 index)
 {
     // Hedges, planter rims, and some roof sheets paint the top plane over a
     // walkable ground underlay. Foliage stays decoration; roof-colored
@@ -1539,7 +1668,16 @@ static bool8 HdMapSampleIsDecorativeOverlay(u32 index)
         && HdMapSamplePlane0IsFloorArt(index);
 }
 
-static bool8 HdMapSampleIsFacadeBody(u32 index, u32 sampleCols, u32 sampleRows)
+static bool8 HdMapSampleIsDecorativeOverlay(u32 index)
+{
+    u8 *cached = &sHdSamplePredicateCaches[HD_PREDICATE_DECORATIVE][index];
+
+    if (*cached == 0)
+        *cached = HdMapSampleIsDecorativeOverlayUncached(index) + 1;
+    return *cached == 2;
+}
+
+static bool8 HdMapSampleIsFacadeBodyUncached(u32 index, u32 sampleCols, u32 sampleRows)
 {
     return sHdMapSamples[index].valid
         && HdMapSampleIsStructuralMaterial(index)
@@ -1550,7 +1688,16 @@ static bool8 HdMapSampleIsFacadeBody(u32 index, u32 sampleCols, u32 sampleRows)
          || (sHdMapSamples[index].collision && HdMapSampleHasVisibleArt(index)));
 }
 
-static bool8 HdMapSampleIsBuildingMass(u32 index, u32 sampleCols, u32 sampleRows)
+static bool8 HdMapSampleIsFacadeBody(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    u8 *cached = &sHdSamplePredicateCaches[HD_PREDICATE_FACADE_BODY][index];
+
+    if (*cached == 0)
+        *cached = HdMapSampleIsFacadeBodyUncached(index, sampleCols, sampleRows) + 1;
+    return *cached == 2;
+}
+
+static bool8 HdMapSampleIsBuildingMassUncached(u32 index, u32 sampleCols, u32 sampleRows)
 {
     const u32 sampleX = index % sampleCols;
     const u32 sampleY = index / sampleCols;
@@ -1569,7 +1716,16 @@ static bool8 HdMapSampleIsBuildingMass(u32 index, u32 sampleCols, u32 sampleRows
                                    sampleCols, sampleRows);
 }
 
-static bool8 HdMapSamplePlanesMatch(u32 index)
+static bool8 HdMapSampleIsBuildingMass(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    u8 *cached = &sHdSamplePredicateCaches[HD_PREDICATE_BUILDING_MASS][index];
+
+    if (*cached == 0)
+        *cached = HdMapSampleIsBuildingMassUncached(index, sampleCols, sampleRows) + 1;
+    return *cached == 2;
+}
+
+static bool8 HdMapSamplePlanesMatchUncached(u32 index)
 {
     const struct HdMapSample *sample = &sHdMapSamples[index];
 
@@ -1601,6 +1757,19 @@ static bool8 HdMapSamplePlanesMatch(u32 index)
     return TRUE;
 }
 
+static bool8 HdMapSamplePlanesMatch(u32 index)
+{
+    struct HdArtPredicateCache *cache = HdArtPredicateCache(index);
+
+    if (!(cache->known & HD_ART_PREDICATE_PLANES_MATCH))
+    {
+        cache->known |= HD_ART_PREDICATE_PLANES_MATCH;
+        if (HdMapSamplePlanesMatchUncached(index))
+            cache->results |= HD_ART_PREDICATE_PLANES_MATCH;
+    }
+    return (cache->results & HD_ART_PREDICATE_PLANES_MATCH) != 0;
+}
+
 static bool8 HdMapSampleSitsOnFacade(u32 index, u32 sampleCols, u32 sampleRows)
 {
     const u32 sampleX = index % sampleCols;
@@ -1611,7 +1780,7 @@ static bool8 HdMapSampleSitsOnFacade(u32 index, u32 sampleCols, u32 sampleRows)
                                    sampleCols, sampleRows);
 }
 
-static bool8 HdMapSampleIsSolidRoofSheet(u32 index, u32 sampleCols, u32 sampleRows)
+static bool8 HdMapSampleIsSolidRoofSheetUncached(u32 index, u32 sampleCols, u32 sampleRows)
 {
     const u32 sampleY = index / sampleCols;
     const bool8 massAbove = sampleY > 0
@@ -1643,8 +1812,17 @@ static bool8 HdMapSampleIsSolidRoofSheet(u32 index, u32 sampleCols, u32 sampleRo
         && HdMapSampleSitsOnFacade(index, sampleCols, sampleRows);
 }
 
-static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
-                               u32 sampleRows)
+static bool8 HdMapSampleIsSolidRoofSheet(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    u8 *cached = &sHdSamplePredicateCaches[HD_PREDICATE_SOLID_ROOF][index];
+
+    if (*cached == 0)
+        *cached = HdMapSampleIsSolidRoofSheetUncached(index, sampleCols, sampleRows) + 1;
+    return *cached == 2;
+}
+
+static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
+                                       u32 sampleRows)
 {
     const u32 sampleX = courseX / 2;
     const u32 sampleY = courseY / 2;
@@ -1700,6 +1878,16 @@ static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
         && !HdMapSampleIsCoveredCourse(sample);
 }
 
+static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
+                               u32 sampleRows)
+{
+    u8 *cached = &sHdRoofArtCache[courseY * sampleCols * 2 + courseX];
+
+    if (*cached == 0)
+        *cached = HdCourseIsRoofArtUncached(courseX, courseY, sampleCols, sampleRows) + 1;
+    return *cached == 2;
+}
+
 static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
 {
     return sHdMapSamples[index].valid
@@ -1708,7 +1896,7 @@ static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
         && HdMapSampleHasVisibleArt(index);
 }
 
-static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRows)
+static bool8 HdMapSampleHasFacadeSupportUncached(u32 index, u32 sampleCols, u32 sampleRows)
 {
     if (index < sampleCols
      || index + sampleCols >= sampleCols * sampleRows
@@ -1732,6 +1920,15 @@ static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRo
         && sHdSampleBaseSurfaces[index + sampleCols] != HD_SURFACE_TERRAIN
         && sHdSampleBaseSurfaces[index + sampleCols] != HD_SURFACE_WATER
         && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows);
+}
+
+static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    u8 *cached = &sHdSamplePredicateCaches[HD_PREDICATE_FACADE_SUPPORT][index];
+
+    if (*cached == 0)
+        *cached = HdMapSampleHasFacadeSupportUncached(index, sampleCols, sampleRows) + 1;
+    return *cached == 2;
 }
 
 static bool8 HdMapSampleIsSupportedWallCore(u32 index, u32 sampleCols, u32 sampleRows)
@@ -2140,7 +2337,7 @@ static bool8 HdMapSampleIsCliffBandSurface(u32 index)
         && surface != HD_SURFACE_TERRAIN;
 }
 
-static bool8 HdMapSampleIsEarthArt(u32 index)
+static bool8 HdMapSampleIsEarthArtUncached(u32 index)
 {
     const struct HdMapSample *sample = &sHdMapSamples[index];
     u32 earth = 0;
@@ -2187,7 +2384,20 @@ static bool8 HdMapSampleIsEarthArt(u32 index)
     return opaque != 0 && earth * 2 >= opaque;
 }
 
-static bool8 HdMapSampleIsWalkableFloorArt(u32 index)
+static bool8 HdMapSampleIsEarthArt(u32 index)
+{
+    struct HdArtPredicateCache *cache = HdArtPredicateCache(index);
+
+    if (!(cache->known & HD_ART_PREDICATE_EARTH))
+    {
+        cache->known |= HD_ART_PREDICATE_EARTH;
+        if (HdMapSampleIsEarthArtUncached(index))
+            cache->results |= HD_ART_PREDICATE_EARTH;
+    }
+    return (cache->results & HD_ART_PREDICATE_EARTH) != 0;
+}
+
+static bool8 HdMapSampleIsWalkableFloorArtUncached(u32 index)
 {
     const u16 metatileId = sHdMapSamples[index].metatileId;
     const struct MapLayout *layout = sHdMapSamples[index].layout;
@@ -2204,7 +2414,20 @@ static bool8 HdMapSampleIsWalkableFloorArt(u32 index)
     return FALSE;
 }
 
-static bool8 HdMapSamplePlane0IsFloorArt(u32 index)
+static bool8 HdMapSampleIsWalkableFloorArt(u32 index)
+{
+    struct HdArtPredicateCache *cache = HdArtPredicateCache(index);
+
+    if (!(cache->known & HD_ART_PREDICATE_WALKABLE_FLOOR))
+    {
+        cache->known |= HD_ART_PREDICATE_WALKABLE_FLOOR;
+        if (HdMapSampleIsWalkableFloorArtUncached(index))
+            cache->results |= HD_ART_PREDICATE_WALKABLE_FLOOR;
+    }
+    return (cache->results & HD_ART_PREDICATE_WALKABLE_FLOOR) != 0;
+}
+
+static bool8 HdMapSamplePlane0IsFloorArtUncached(u32 index)
 {
     const struct HdMapSample *sample = &sHdMapSamples[index];
 
@@ -2221,7 +2444,20 @@ static bool8 HdMapSamplePlane0IsFloorArt(u32 index)
     return FALSE;
 }
 
-static bool8 HdMapSampleIsFoliageArt(u32 index)
+static bool8 HdMapSamplePlane0IsFloorArt(u32 index)
+{
+    struct HdArtPredicateCache *cache = HdArtPredicateCache(index);
+
+    if (!(cache->known & HD_ART_PREDICATE_PLANE0_FLOOR))
+    {
+        cache->known |= HD_ART_PREDICATE_PLANE0_FLOOR;
+        if (HdMapSamplePlane0IsFloorArtUncached(index))
+            cache->results |= HD_ART_PREDICATE_PLANE0_FLOOR;
+    }
+    return (cache->results & HD_ART_PREDICATE_PLANE0_FLOOR) != 0;
+}
+
+static bool8 HdMapSampleIsFoliageArtUncached(u32 index)
 {
     const struct HdMapSample *sample = &sHdMapSamples[index];
     const u8 plane = HdMetatileCoverage(sample, 1) != 0 ? 1 : 0;
@@ -2250,7 +2486,20 @@ static bool8 HdMapSampleIsFoliageArt(u32 index)
     return opaque != 0 && foliage * 2 >= opaque;
 }
 
-static bool8 HdMapSampleIsCliffSeed(u32 index)
+static bool8 HdMapSampleIsFoliageArt(u32 index)
+{
+    struct HdArtPredicateCache *cache = HdArtPredicateCache(index);
+
+    if (!(cache->known & HD_ART_PREDICATE_FOLIAGE))
+    {
+        cache->known |= HD_ART_PREDICATE_FOLIAGE;
+        if (HdMapSampleIsFoliageArtUncached(index))
+            cache->results |= HD_ART_PREDICATE_FOLIAGE;
+    }
+    return (cache->results & HD_ART_PREDICATE_FOLIAGE) != 0;
+}
+
+static bool8 HdMapSampleIsCliffSeedUncached(u32 index)
 {
     const u8 behavior = UNPACK_BEHAVIOR(sHdMapAttributes[index]);
 
@@ -2271,6 +2520,15 @@ static bool8 HdMapSampleIsCliffSeed(u32 index)
     // become cliff sheets; hedges and plaza copies stay on the ground.
     return HdMapSampleIsEarthArt(index)
         && !HdMapSampleIsWalkableFloorArt(index);
+}
+
+static bool8 HdMapSampleIsCliffSeed(u32 index)
+{
+    u8 *cached = &sHdSamplePredicateCaches[HD_PREDICATE_CLIFF_SEED][index];
+
+    if (*cached == 0)
+        *cached = HdMapSampleIsCliffSeedUncached(index) + 1;
+    return *cached == 2;
 }
 
 static void HdPublishCliffBandCell(u32 sampleX, u32 sampleY, u32 sampleCols,
@@ -2813,17 +3071,10 @@ static void HdClassifyBuildingComponents(u32 sampleCols, u32 sampleRows,
     HdPublishBuildingComponents(courseCols, courseRows);
 }
 
-static bool8 MapWorldPixel(s32 screenX, s32 screenY, s16 cameraOffsetX, s16 cameraOffsetY,
-                           const struct HdMapSample *sample, u16 attributes,
+static bool8 MapWorldPixel(s32 screenX, s32 screenY, const struct HdMapSample *sample,
+                           u16 attributes, u32 bottomPacked, u32 topPacked,
                            struct Rgb *color, u8 *layer)
 {
-    const s32 viewX = screenX + cameraOffsetX;
-    const s32 viewY = screenY + cameraOffsetY;
-    const u8 localX = viewX - FloorDiv16(viewX) * 16;
-    const u8 localY = viewY - FloorDiv16(viewY) * 16;
-    const u8 quadrant = (localY / 8) * 2 + localX / 8;
-    const u8 pixelX = localX & 7;
-    const u8 pixelY = localY & 7;
     u8 layerType;
     u8 bottomLayer;
     u8 topLayer;
@@ -2862,8 +3113,20 @@ static bool8 MapWorldPixel(s32 screenX, s32 screenY, s16 cameraOffsetX, s16 came
         mask = WindowMask(screenX, screenY);
     *color = GbaColor(ReadU16(BG_PLTT));
     *layer = LAYER_BACKDROP;
-    bottomVisible = (mask & bottomLayer) && HdMetatilePixel(sample->layout, sample->metatileId, 0, quadrant, pixelX, pixelY, &bottomColor);
-    topVisible = (mask & topLayer) && HdMetatilePixel(sample->layout, sample->metatileId, 1, quadrant, pixelX, pixelY, &topColor);
+    bottomVisible = (mask & bottomLayer) && (bottomPacked >> 24) != 0;
+    topVisible = (mask & topLayer) && (topPacked >> 24) != 0;
+    if (bottomVisible)
+    {
+        bottomColor.r = bottomPacked;
+        bottomColor.g = bottomPacked >> 8;
+        bottomColor.b = bottomPacked >> 16;
+    }
+    if (topVisible)
+    {
+        topColor.r = topPacked;
+        topColor.g = topPacked >> 8;
+        topColor.b = topPacked >> 16;
+    }
     if (bottomVisible)
     {
         *color = bottomColor;
@@ -2887,7 +3150,8 @@ static bool8 MapWorldPixel(s32 screenX, s32 screenY, s16 cameraOffsetX, s16 came
 
 static bool8 HdStructuralPixelVisible(u32 courseX, u32 courseY,
                                       u32 courseCols, u32 courseRows,
-                                      u8 pixelX, u8 pixelY, u8 visibleLayer)
+                                      u8 pixelX, u8 pixelY, u8 visibleLayer,
+                                      u32 visiblePacked)
 {
     const u32 course = courseY * courseCols + courseX;
     const u16 geometry = sHdCourseGeometry[course];
@@ -2898,27 +3162,16 @@ static bool8 HdStructuralPixelVisible(u32 courseX, u32 courseY,
     const u8 layerType = UNPACK_LAYER_TYPE(sHdMapAttributes[sample]);
     const u8 topLayer = layerType == METATILE_LAYER_TYPE_COVERED ? LAYER_BG2 : LAYER_BG1;
     const u8 bottomLayer = layerType == METATILE_LAYER_TYPE_NORMAL ? LAYER_BG2 : LAYER_BG3;
-    const u8 quadrant = (courseY & 1) * 2 + (courseX & 1);
     struct Rgb sourceColor;
 
-    if (surface != HD_SURFACE_WALL)
+    if (surface != HD_SURFACE_WALL && surface != HD_SURFACE_ROOF)
         return FALSE;
-    if (visibleLayer == topLayer)
-    {
-        if (!HdMetatilePixel(sHdMapSamples[sample].layout,
-                             sHdMapSamples[sample].metatileId, 1,
-                             quadrant, pixelX, pixelY, &sourceColor))
-            return FALSE;
-    }
-    else if (visibleLayer == bottomLayer)
-    {
-        if (!HdMetatilePixel(sHdMapSamples[sample].layout,
-                             sHdMapSamples[sample].metatileId, 0,
-                             quadrant, pixelX, pixelY, &sourceColor))
-            return FALSE;
-    }
-    else
+    if ((visibleLayer != topLayer && visibleLayer != bottomLayer)
+     || (visiblePacked >> 24) == 0)
         return FALSE;
+    sourceColor.r = visiblePacked;
+    sourceColor.g = visiblePacked >> 8;
+    sourceColor.b = visiblePacked >> 16;
 
     // Either plane may carry facade details or repeated ground underlay.
     // Compare the visible source with the first authored receiver below this
@@ -2937,7 +3190,8 @@ static bool8 HdStructuralPixelVisible(u32 courseX, u32 courseY,
         struct Rgb receiverColor;
         bool8 receiverVisible = FALSE;
 
-        if (receiverSurface == HD_SURFACE_WALL && receiverComponent == component)
+        if ((receiverSurface == HD_SURFACE_WALL || receiverSurface == HD_SURFACE_ROOF)
+         && receiverComponent == component)
             continue;
         if (HdMetatilePixel(sHdMapSamples[receiverSample].layout,
                             sHdMapSamples[receiverSample].metatileId, 0,
@@ -2965,8 +3219,17 @@ static void RenderHd2dWorld(u16 dispcnt)
 {
     s16 cameraOffsetX;
     s16 cameraOffsetY;
+    static u16 courseXs[HD2D_WORLD_WIDTH];
+    static u16 sampleXs[HD2D_WORLD_WIDTH];
+    static u8 pixelXs[HD2D_WORLD_WIDTH];
 
     (void)dispcnt;
+    if (++sHdDecodedCourseGeneration == 0)
+    {
+        memset(sHdDecodedCourseCaches, 0, sizeof(sHdDecodedCourseCaches));
+        memset(sHdArtPredicateCaches, 0, sizeof(sHdArtPredicateCaches));
+        sHdDecodedCourseGeneration = 1;
+    }
     // Recover the full signed scripted pan from the same state used to place
     // OAM. Unlike masking GetCameraOffsetWithPan to 0..15, this preserves the
     // normal +32 vertical pan and larger camera shakes, keeping entity feet on
@@ -3006,6 +3269,21 @@ static void RenderHd2dWorld(u16 dispcnt)
     const s32 maxMapY = renderMaxMapY + HD2D_GEOMETRY_RADIUS;
     const u32 sampleCols = maxMapX - minMapX + 1;
     const u32 sampleRows = maxMapY - minMapY + 1;
+
+    for (u32 predicate = 0; predicate < HD_PREDICATE_COUNT; predicate++)
+        memset(sHdSamplePredicateCaches[predicate], 0, sampleCols * sampleRows);
+    memset(sHdRoofArtCache, 0, sampleCols * sampleRows * 4);
+
+    for (u32 x = 0; x < HD2D_WORLD_WIDTH; x++)
+    {
+        const s32 viewX = (s32)x - HD2D_WORLD_OFFSET_X + cameraOffsetX;
+        const s32 mapOffsetX = FloorDiv16(viewX);
+        const u8 localX = viewX - mapOffsetX * 16;
+
+        sampleXs[x] = gSaveBlock1Ptr->pos.x + mapOffsetX - minMapX;
+        courseXs[x] = sampleXs[x] * 2 + localX / HD2D_TILE_WIDTH;
+        pixelXs[x] = localX & (HD2D_TILE_WIDTH - 1);
+    }
 
     for (u32 sampleY = 0; sampleY < sampleRows; sampleY++)
     {
@@ -3061,29 +3339,49 @@ static void RenderHd2dWorld(u16 dispcnt)
                                      renderMinMapX - minMapX, renderMinMapY - minMapY,
                                      renderMaxMapX - minMapX + 1, renderMaxMapY - minMapY + 1);
     }
+    const u8 bg1Priority = ReadU16(REG_BASE + REG_OFFSET_BG1CNT) & 3;
+    const u8 bg2Priority = ReadU16(REG_BASE + REG_OFFSET_BG2CNT) & 3;
+    const u8 bg3Priority = ReadU16(REG_BASE + REG_OFFSET_BG3CNT) & 3;
+
     for (u32 y = 0; y < HD2D_WORLD_HEIGHT; y++)
     {
+        const s32 screenY = (s32)y - HD2D_WORLD_OFFSET_Y;
+        const s32 viewY = screenY + cameraOffsetY;
+        const s32 mapOffsetY = FloorDiv16(viewY);
+        const u8 localY = viewY - mapOffsetY * 16;
+        const u32 sampleY = gSaveBlock1Ptr->pos.y + mapOffsetY - minMapY;
+        const u32 courseY = sampleY * 2 + localY / HD2D_TILE_WIDTH;
+        const u8 pixelY = localY & (HD2D_TILE_WIDTH - 1);
+        const u32 *bottomCourse = NULL;
+        const u32 *topCourse = NULL;
+        u32 previousCourseX = 0xffffffff;
+
         for (u32 x = 0; x < HD2D_WORLD_WIDTH; x++)
         {
             const s32 screenX = (s32)x - HD2D_WORLD_OFFSET_X;
-            const s32 screenY = (s32)y - HD2D_WORLD_OFFSET_Y;
             const u32 pixel = y * HD2D_WORLD_WIDTH + x;
             const u32 p = pixel * RGBA_CHANNELS;
             struct Rgb color;
             u8 layer;
-
-            const s32 viewX = screenX + cameraOffsetX;
-            const s32 viewY = screenY + cameraOffsetY;
-            const s32 mapX = gSaveBlock1Ptr->pos.x + FloorDiv16(viewX);
-            const s32 mapY = gSaveBlock1Ptr->pos.y + FloorDiv16(viewY);
-            const u32 courseX = (mapX - minMapX) * 2
-                              + (viewX - FloorDiv16(viewX) * 16) / HD2D_TILE_WIDTH;
-            const u32 courseY = (mapY - minMapY) * 2
-                              + (viewY - FloorDiv16(viewY) * 16) / HD2D_TILE_WIDTH;
+            const u32 courseX = courseXs[x];
             const u32 courseIndex = courseY * sampleCols * 2 + courseX;
-            const u32 sampleIndex = (mapY - minMapY) * sampleCols + mapX - minMapX;
-            const bool8 mapVisible = MapWorldPixel(screenX, screenY, cameraOffsetX, cameraOffsetY,
-                                                   &sHdMapSamples[sampleIndex], sHdMapAttributes[sampleIndex],
+            const u32 sampleIndex = sampleY * sampleCols + sampleXs[x];
+            const u8 quadrant = (courseY & 1) * 2 + (courseX & 1);
+            const struct HdMapSample *mapSample = &sHdMapSamples[sampleIndex];
+            u32 bottomPacked;
+            u32 topPacked;
+
+            if (courseX != previousCourseX)
+            {
+                bottomCourse = HdMetatileCourse(mapSample->layout, mapSample->metatileId, 0, quadrant);
+                topCourse = HdMetatileCourse(mapSample->layout, mapSample->metatileId, 1, quadrant);
+                previousCourseX = courseX;
+            }
+            bottomPacked = bottomCourse[pixelY * HD2D_TILE_WIDTH + pixelXs[x]];
+            topPacked = topCourse[pixelY * HD2D_TILE_WIDTH + pixelXs[x]];
+            const bool8 mapVisible = MapWorldPixel(screenX, screenY,
+                                                   mapSample, sHdMapAttributes[sampleIndex],
+                                                   bottomPacked, topPacked,
                                                    &color, &layer);
             sWasmWorldRgba[p] = color.r;
             sWasmWorldRgba[p + 1] = color.g;
@@ -3091,15 +3389,16 @@ static void RenderHd2dWorld(u16 dispcnt)
             sWasmWorldRgba[p + 3] = mapVisible ? 255 : 0;
             sWasmWorldStructuralAlpha[pixel] = HdStructuralPixelVisible(
                 courseX, courseY, sampleCols * 2, sampleRows * 2,
-                (viewX - FloorDiv16(viewX) * 16) & (HD2D_TILE_WIDTH - 1),
-                (viewY - FloorDiv16(viewY) * 16) & (HD2D_TILE_WIDTH - 1), layer) ? 255 : 0;
+                pixelXs[x], pixelY, layer,
+                layer == (UNPACK_LAYER_TYPE(sHdMapAttributes[sampleIndex]) == METATILE_LAYER_TYPE_COVERED
+                    ? LAYER_BG2 : LAYER_BG1) ? topPacked : bottomPacked) ? 255 : 0;
             sWasmWorldLayerData[pixel] = layer;
             if (layer == LAYER_BG1)
-                sWasmBgPriorityData[pixel] = ReadU16(REG_BASE + REG_OFFSET_BG1CNT) & 3;
+                sWasmBgPriorityData[pixel] = bg1Priority;
             else if (layer == LAYER_BG2)
-                sWasmBgPriorityData[pixel] = ReadU16(REG_BASE + REG_OFFSET_BG2CNT) & 3;
+                sWasmBgPriorityData[pixel] = bg2Priority;
             else if (layer == LAYER_BG3)
-                sWasmBgPriorityData[pixel] = ReadU16(REG_BASE + REG_OFFSET_BG3CNT) & 3;
+                sWasmBgPriorityData[pixel] = bg3Priority;
             else
                 sWasmBgPriorityData[pixel] = 4;
             sWasmWorldHeightData[pixel] = sHdCourseHeights[courseIndex];

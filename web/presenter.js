@@ -225,6 +225,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
 const TO_KEY = normalize(vec3f(-0.45, 0.77, -0.45));
 const SURFACE_WATER = 1u;
+const SURFACE_ROOF = 6u;
 const MATERIAL_NEUTRAL_BUILDING = 8u;
 
 fn structuralVisibility(position: vec3f, normal: vec3f) -> f32 {
@@ -266,8 +267,11 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
     base *= tone * (1.0 - seam * 0.07);
   } else {
     let world = textureSampleLevel(worldTexture, pixelSampler, input.uv, 0.0);
-    if (input.material == 5u
-        && textureSampleLevel(structuralAlphaTexture, pixelSampler, input.uv, 0.0).r < 0.5) {
+    let structuralAlpha = textureSampleLevel(structuralAlphaTexture, pixelSampler, input.uv, 0.0).r;
+    if (input.material == SURFACE_ROOF && structuralAlpha < 0.5) {
+      discard;
+    }
+    if (input.material == 5u && structuralAlpha < 0.5) {
       // 2D facade holes are ground showing through the wall art. In 3D those
       // pixels are the building shell, not empty space.
       if (input.neutralColor.x + input.neutralColor.y + input.neutralColor.z <= 0.001) {
@@ -301,12 +305,33 @@ struct Camera {
 }
 struct VertexInput {
   @location(0) position: vec3f,
+  @location(1) uv: vec2f,
+  @location(3) material: f32,
+}
+struct VertexOutput {
+  @builtin(position) position: vec4f,
+  @location(0) uv: vec2f,
+  @location(1) @interpolate(flat) material: u32,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var structuralAlphaTexture: texture_2d<f32>;
 
 @vertex
-fn vertexMain(input: VertexInput) -> @builtin(position) vec4f {
-  return camera.lightTransform * vec4f(input.position, 1.0);
+fn vertexMain(input: VertexInput) -> VertexOutput {
+  var output: VertexOutput;
+  output.position = camera.lightTransform * vec4f(input.position, 1.0);
+  output.uv = input.uv;
+  output.material = u32(input.material);
+  return output;
+}
+
+@fragment
+fn fragmentMain(input: VertexOutput) {
+  if (input.material == 6u) {
+    let size = vec2i(textureDimensions(structuralAlphaTexture));
+    let pixel = clamp(vec2i(input.uv * vec2f(size)), vec2i(0), size - 1);
+    if (textureLoad(structuralAlphaTexture, pixel, 0).r < 0.5) { discard; }
+  }
 }
 `;
 
@@ -741,14 +766,20 @@ class WebGpuPresenter {
         module: structuralShadowModule, entryPoint: 'vertexMain',
         buffers: [{ arrayStride: VERTEX_FLOATS * 4, attributes: [
           { shaderLocation: 0, offset: 0, format: 'float32x3' },
+          { shaderLocation: 1, offset: 12, format: 'float32x2' },
+          { shaderLocation: 3, offset: 32, format: 'float32' },
         ] }],
       },
+      fragment: { module: structuralShadowModule, entryPoint: 'fragmentMain', targets: [] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' },
     });
     this.structuralShadowBindGroup = device.createBindGroup({
       layout: this.structuralShadowPipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this.cameraBuffer } }],
+      entries: [
+        { binding: 0, resource: { buffer: this.cameraBuffer } },
+        { binding: 1, resource: this.structuralAlphaTexture.createView() },
+      ],
     });
 
     const castShadowModule = device.createShaderModule({ label: 'projected sprite shadow shader', code: CAST_SHADOW_SHADER });

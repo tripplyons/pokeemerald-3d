@@ -100,6 +100,9 @@ $(WASM_OBJ_DIR)/task.o: WASM_OPT_FLAGS := -O3
 $(WASM_OBJ_DIR)/tileset_anims.o: Makefile
 $(WASM_OBJ_DIR)/tileset_anims.o: WASM_OPT_FLAGS := -O3
 
+$(WASM_OBJ_DIR)/wasm_display.o: Makefile
+$(WASM_OBJ_DIR)/wasm_display.o: WASM_OPT_FLAGS := -O3
+
 $(WASM_OBJ_DIR)/%.o: $(C_SUBDIR)/%.c
 	@mkdir -p $(dir $@)
 	$(WASM_CC) --target=wasm32-unknown-unknown -DMODERN=1 -DWASM=1 -I $(WASM_BUILD_DIR) -I include/wasm -I include -iquote include -E $< | $(PREPROC) -i -g $(ASSETS_DIR_NAME) $< charmap.txt | $(WASM_CC) --target=wasm32-unknown-unknown -x c $(WASM_OPT_FLAGS) -Wno-incompatible-library-redeclaration -Wno-unknown-attributes -Wno-ignored-attributes -Wno-parentheses -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -Wno-builtin-requires-header -Wno-gnu-alignof-expression -Wno-unknown-escape-sequence -Wno-excess-initializers -c - -o $@
