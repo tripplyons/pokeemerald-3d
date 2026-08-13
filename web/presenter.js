@@ -1164,11 +1164,13 @@ class WebGpuPresenter {
         const start = ty * cols + tx;
         if (visited[start]) continue;
         visited[start] = 1;
-        if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL) {
-          // Wall courses occupy the building footprint. Fill every one with
-          // the first authored ground south of this column so the shell is
-          // opaque. Reusing that one front course avoids reprinting each
-          // facade row as a second floor.
+        const structuralSource = surfaceAt(tx, ty) === HD2D_SURFACE_WALL
+          || surfaceAt(tx, ty) === HD2D_SURFACE_ROOF;
+        if (structuralSource) {
+          // Wall source rows are removed from the floor, and roof pixels now
+          // use an authored alpha mask. Put the real receiver beneath both:
+          // otherwise transparent roof pixels reveal the scene clear color as
+          // black rectangular holes instead of the ground below the building.
           let sourceY = ty + 1;
           while (sourceY < rows
               && (surfaceAt(tx, sourceY) === HD2D_SURFACE_WALL
@@ -1177,6 +1179,7 @@ class WebGpuPresenter {
                || componentAt(tx, sourceY) === componentAt(tx, ty))) sourceY++;
           sourceY = Math.min(rows - 1, sourceY);
           const ground = groundHeights[start];
+          const isWall = surfaceAt(tx, ty) === HD2D_SURFACE_WALL;
           quad(
             [worldX(tx),ground,worldZ(ty),textureU(tx),textureV(sourceY)],
             [worldX(tx + 1),ground,worldZ(ty),textureU(tx + 1),textureV(sourceY)],
@@ -1184,7 +1187,7 @@ class WebGpuPresenter {
             [worldX(tx),ground,worldZ(ty + 1),textureU(tx),textureV(sourceY + 1)],
             [0, 1, 0], surfaceAt(tx, sourceY),
           );
-          continue;
+          if (isWall) continue;
         }
 
         const word = geometry[start];
@@ -1398,26 +1401,31 @@ class WebGpuPresenter {
       component.wallBody = selectWallBodyColor(wallCells, component.sideMaterial);
     }
     for (const component of components.values()) {
-      const wallRows = [];
-      for (let ty = 0; ty < rows; ty++) {
-        const cells = [];
-        for (let tx = 0; tx < cols; tx++) {
-          if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL
-              && componentAt(tx, ty) === component.id) cells.push(tx);
-        }
-        if (cells.length) wallRows.push([ty, cells]);
-      }
-      if (!wallRows.length) continue;
-      const firstRow = wallRows[0][0];
+      const pending = new Set(component.wallCells.map(([tx, ty]) => `${tx},${ty}`));
       let top = component.roofHeight;
-      if (!Number.isFinite(top)) top = component.base + wallRows.length * TILE_SIZE;
-      const z = worldZ(firstRow);
+      if (!Number.isFinite(top)) top = component.base + TILE_SIZE;
       const side = component.wallBody || component.sideMaterial || [0, 0, 0];
-      for (const [ty, cells] of wallRows) {
-        const rowOffset = ty - firstRow;
-        const courseTop = top - rowOffset * TILE_SIZE;
-        const courseBottom = courseTop - TILE_SIZE;
-        for (const tx of cells) {
+      while (pending.size) {
+        const firstKey = pending.values().next().value;
+        pending.delete(firstKey);
+        const [seedX, seedY] = firstKey.split(',').map(Number);
+        const cluster = [[seedX, seedY]];
+        for (let index = 0; index < cluster.length; index++) {
+          const [x, y] = cluster[index];
+          for (const [dx, dy] of [[-1,0], [1,0], [0,-1], [0,1]]) {
+            const key = `${x + dx},${y + dy}`;
+            if (!pending.delete(key)) continue;
+            cluster.push([x + dx, y + dy]);
+          }
+        }
+        const firstRow = Math.min(...cluster.map(([, ty]) => ty));
+        const lastRow = Math.max(...cluster.map(([, ty]) => ty));
+        if (!Number.isFinite(component.roofHeight))
+          top = Math.max(top, component.base + (lastRow - firstRow + 1) * TILE_SIZE);
+        const z = worldZ(firstRow);
+        for (const [tx, ty] of cluster) {
+          const courseTop = top - (ty - firstRow) * TILE_SIZE;
+          const courseBottom = courseTop - TILE_SIZE;
           quad(
             [worldX(tx),courseBottom,z,textureU(tx),textureV(ty + 1)],
             [worldX(tx + 1),courseBottom,z,textureU(tx + 1),textureV(ty + 1)],
