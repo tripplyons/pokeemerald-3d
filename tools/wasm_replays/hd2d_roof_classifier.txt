@@ -13,3 +13,6 @@
 723 warp 0 5 24 16
 923 screenshot lilycove-pc
 923 probe hd2d-courses 18
+924 warp 0 5 12 23
+1124 screenshot lilycove-west-house
+1124 probe hd2d-courses 18
