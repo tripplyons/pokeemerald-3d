@@ -1259,6 +1259,73 @@ class WebGpuPresenter {
           (facadeAt(tx, ty) & HD2D_FACADE_STEPPED_TIER) !== 0))
         steppedComponents.add(component.id);
     }
+    // A high stepped tier must close onto a directly adjoining lower tier,
+    // even when their authored roof rows become staggered after projection.
+    // Keep the fallback local to that exact source-space component edge: a
+    // transitive tier elsewhere in the shell must not suppress exposed sides.
+    const tierNeighbors = new Map(Array.from(steppedComponents,
+      (id) => [id, new Set()]));
+    for (const id of steppedComponents) {
+      const component = components.get(id);
+      for (const [tx, ty] of component.wallCells) {
+        for (const dx of [-1, 1]) {
+          const neighbor = componentAt(tx + dx, ty);
+          if (steppedComponents.has(neighbor) && neighbor !== id) {
+            tierNeighbors.get(id).add(neighbor);
+            tierNeighbors.get(neighbor).add(id);
+          }
+        }
+      }
+    }
+    for (const id of steppedComponents) {
+      const component = components.get(id);
+      component.tierSupportByColumn = new Map();
+      for (const neighborId of tierNeighbors.get(id)) {
+        const neighbor = components.get(neighborId);
+        // Only a lower adjoining roof supports this side. Letting the high tier
+        // suppress the lower tier's closure can erase a legitimate outer face.
+        if (neighbor.roofHeight >= component.roofHeight) continue;
+        for (const [tx] of [...neighbor.roofCells, ...neighbor.wallCells])
+          component.tierSupportByColumn.set(tx,
+            Math.max(component.tierSupportByColumn.get(tx) ?? -Infinity,
+                     neighbor.roofHeight));
+      }
+    }
+    const tierColumnRoofHeight = (component, tx) =>
+      component.tierSupportByColumn?.get(tx) ?? -Infinity;
+
+    // A disconnected roof-art island with no wall beneath it is decorative
+    // map art, not another box belonging to the nearby building. Its masked
+    // horizontal pixels may remain, but a generated perimeter would turn an
+    // otherwise transparent course into a conspicuous neutral cube.
+    const roofCellKey = (tx, ty) => `${tx}:${ty}`;
+    for (const component of components.values()) {
+      const pending = new Set(component.roofCells.map(([tx, ty]) => roofCellKey(tx, ty)));
+      component.roofClosureCells = new Set();
+      while (pending.size) {
+        const first = pending.values().next().value;
+        const queue = [first];
+        const island = [];
+        let supported = false;
+        pending.delete(first);
+        while (queue.length) {
+          const key = queue.pop();
+          const [tx, ty] = key.split(':').map(Number);
+          island.push(key);
+          if (inGrid(tx, ty + 1) && componentAt(tx, ty + 1) === component.id
+              && surfaceAt(tx, ty + 1) === HD2D_SURFACE_WALL)
+            supported = true;
+          for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+            const neighbor = roofCellKey(tx + dx, ty + dy);
+            if (!pending.delete(neighbor)) continue;
+            queue.push(neighbor);
+          }
+        }
+        if (supported)
+          for (const key of island) component.roofClosureCells.add(key);
+      }
+    }
+
     for (const component of components.values()) {
       component.frontShift = 0;
       component.roofNorthTy = 0;
@@ -1601,7 +1668,8 @@ class WebGpuPresenter {
         // the building footprint below it. Its supported neighbor closes the
         // real shell; dropping this exposed perimeter to ground creates the
         // long side-wall curtains visible beside actors walking behind it.
-        if (roofOverhangAt(tx, ty)) continue;
+        if (roofOverhangAt(tx, ty)
+            || !component.roofClosureCells.has(roofCellKey(tx, ty))) continue;
         const height = heightAt(tx, ty);
         const z0 = worldZ(roofMapTy(component, ty));
         const z1 = worldZ(roofMapTy(component, ty + 1));
@@ -1628,7 +1696,8 @@ class WebGpuPresenter {
             const physicalMidY = (segmentY0 + segmentY1) / 2;
             const bottom = Math.max(component.base,
                                     physicalReceiverHeightAt(tx + dx, physicalMidY),
-                                    physicalRoofHeightAt(tx + dx, physicalMidY));
+                                    physicalRoofHeightAt(tx + dx, physicalMidY),
+                                    tierColumnRoofHeight(component, tx + dx));
             if (bottom >= height) continue;
             const segmentZ0 = worldZ(segmentY0);
             const segmentZ1 = worldZ(segmentY1);
