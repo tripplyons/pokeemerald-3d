@@ -1049,6 +1049,7 @@ struct HdBuildingCandidate
     bool8 hasEntrance;
     bool8 isClipped;
     bool8 isSteppedTier;
+    s16 tierCeiling;
 };
 
 struct HdBuildingBounds
@@ -2942,6 +2943,78 @@ static bool8 HdCourseColumnSupportsRoofClaim(u32 courseX, u32 courseY,
         || sHdCourseBuilding[southCourse + courseCols + 1] >= 0;
 }
 
+static bool8 HdCourseIsClaimedRoofOrRoofArt(u16 building, u32 courseX, u32 courseY,
+                                            u32 courseCols, u32 sampleCols,
+                                            u32 sampleRows)
+{
+    const u32 course = courseY * courseCols + courseX;
+
+    if (sHdCourseBuilding[course] == (s16)building
+     && (sHdCourseBuildingKind[course] & HD_BUILDING_ROOF))
+        return TRUE;
+    return HdCourseIsRoofArt(courseX, courseY, sampleCols, sampleRows);
+}
+
+static bool8 HdCourseContinuesRoofTrim(u16 building, u32 courseX, u32 courseY,
+                                       u32 courseCols, u32 sampleCols, u32 sampleRows)
+{
+    const u32 sample = (courseY / 2) * sampleCols + courseX / 2;
+
+    // Only stepped tiers hunt for silhouette trim. A standalone shell whose
+    // flood stops at the sheet predicates has drawn that outline since the
+    // classifier landed; reinterpreting its crown rows as cap flips whole
+    // wings between the facade-sheet and extruded-box render styles
+    // (Battle Tower side wings).
+    if (!sHdBuildings[building].isSteppedTier
+     || sHdBuildings[building].tierCeiling <= 0
+     || sHdBuildings[building].roofHeight >= sHdBuildings[building].tierCeiling)
+        return FALSE;
+    // Roof silhouettes keep edge and corner trim tiles whose art fails the
+    // sheet predicates: side wedges painted over the neighboring facade's
+    // decorative row, corner slopes whose bottom plane holds unrelated
+    // underlay. They are cap art when they continue proven roof both to the
+    // south and sideways; anything grounded (doors, covered facade, foliage,
+    // prop stacks, bare floor) stays out of the cap.
+    if (!sHdMapSamples[sample].valid
+     || !HdMapSampleIsStructuralMaterial(sample)
+     || !HdMapSampleHasTopArt(sample)
+     || !HdCourseHasVisibleArt(courseX, courseY, sampleCols)
+     || HdMapSampleIsDoorCourse(sample)
+     || HdMapSampleIsCoveredCourse(sample)
+     || HdMapSampleIsFoliageArt(sample)
+     || HdMapSampleIsPropColumn(sample, sampleCols, sampleRows))
+        return FALSE;
+    if (HdMapSampleIsFloorSurface(sample, sampleCols, sampleRows)
+     && !HdMapSampleIsDecorativeOverlay(sample))
+        return FALSE;
+    // The course directly south must already belong to this building's cap
+    // (a claim, or proven roof art on a sample this flood already claimed).
+    // Predicate-only roof art south is not enough: walkable platform strips
+    // beside tree houses sit north of foreign roof art and must stay put.
+    if (courseY + 1 >= sampleRows * 2)
+        return FALSE;
+    {
+        const u32 south = (courseY + 1) * courseCols + courseX;
+        const u32 southSample = ((courseY + 1) / 2) * sampleCols + courseX / 2;
+
+        if (sHdCourseBuilding[south] != (s16)building
+         || !(sHdCourseBuildingKind[south] & HD_BUILDING_ROOF))
+            return FALSE;
+        // A non-blocking course south is a rear overhang (walkable gable):
+        // the physical shell already ended there, and anything north of it
+        // (fence rows behind the building) is scenery, not more cap.
+        if (!sHdMapSamples[southSample].collision)
+            return FALSE;
+    }
+    if (courseX > 0
+     && HdCourseIsClaimedRoofOrRoofArt(building, courseX - 1, courseY,
+                                       courseCols, sampleCols, sampleRows))
+        return TRUE;
+    return courseX + 1 < courseCols
+        && HdCourseIsClaimedRoofOrRoofArt(building, courseX + 1, courseY,
+                                          courseCols, sampleCols, sampleRows);
+}
+
 static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
                                 u32 spanEnd, u32 sampleCols, u32 sampleRows,
                                 u32 courseCols, const struct HdBuildingBounds *bounds)
@@ -2992,8 +3065,16 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
              || nextY[direction] < (s32)minY || nextY[direction] > (s32)seedY)
                 continue;
             next = nextY[direction] * courseCols + nextX[direction];
-            if (sHdCourseVisit[next] == visit
-             || !HdCourseIsRoofArt(nextX[direction], nextY[direction], sampleCols, sampleRows))
+            if (sHdCourseVisit[next] == visit)
+                continue;
+            // Trim continuation is a silhouette guess, not proven roof art;
+            // keep it above this band's own wall columns. A column past the
+            // span may be a neighboring tier's shell that must keep its own
+            // height (gym wings beside the tall entrance pavilion).
+            if (!HdCourseIsRoofArt(nextX[direction], nextY[direction], sampleCols, sampleRows)
+             && !(nextX[direction] >= (s32)spanStart && nextX[direction] < (s32)spanEnd
+               && HdCourseContinuesRoofTrim(building, nextX[direction], nextY[direction],
+                                            courseCols, sampleCols, sampleRows)))
                 continue;
             sHdCourseVisit[next] = visit;
             sHdCourseQueue[queueEnd++] = next;
@@ -3015,6 +3096,115 @@ struct HdFacadeBand
 
 static struct HdFacadeBand sHdFacadeBands[HD2D_BUILDING_COUNT];
 
+static s16 HdBandAdjacentClaimedRoofHeight(const struct HdFacadeBand *band,
+                                           u32 sampleCols, u32 sampleRows)
+{
+    // The tallest already-claimed wall this band touches. A genuine stepped
+    // wing sits strictly below that shell AND shares its walkable front line
+    // (within one row): gym wings flank their entrance pavilion. A band
+    // whose shell continues far south of the band's own front is standing
+    // BEHIND that building (Petalburg PC rear rows); it is scenery depth,
+    // not a lower tier, and keeps its row-level claims.
+    const u32 courseCols = sampleCols * 2;
+    const u32 courseRows = sampleRows * 2;
+    const u32 wallStartCourse = band->wallTop == band->y
+        ? band->wallTop * 2 : band->wallTop * 2 + 1;
+    const u32 wallEndCourse = band->y * 2 + 2;
+    const u32 x0 = band->spanStart * 2 > 0 ? band->spanStart * 2 - 1 : 0;
+    const u32 x1 = (band->spanEnd + 1) * 2 < courseCols
+        ? (band->spanEnd + 1) * 2 : courseCols - 1;
+    const u32 yEnd = wallEndCourse + 8 < courseRows ? wallEndCourse + 8 : courseRows;
+    s16 best = -1;
+    u32 deepest = 0;
+
+    for (u32 courseY = wallStartCourse; courseY < yEnd; courseY++)
+    {
+        for (u32 courseX = x0; courseX <= x1; courseX++)
+        {
+            const u32 course = courseY * courseCols + courseX;
+
+            if (sHdCourseBuilding[course] < 0
+             || !(sHdCourseBuildingKind[course] & HD_BUILDING_WALL))
+                continue;
+            if (courseY < wallEndCourse
+             && sHdBuildings[sHdCourseBuilding[course]].roofHeight > best)
+                best = sHdBuildings[sHdCourseBuilding[course]].roofHeight;
+            if (courseY + 1 > deepest)
+                deepest = courseY + 1;
+        }
+    }
+    if (deepest > wallEndCourse + 2)
+        return -1;
+    return best;
+}
+
+static bool8 HdMapRowIsFacadeOrCap(u32 row, u32 startX, u32 endX,
+                                   u32 sampleCols, u32 sampleRows)
+{
+    // A row qualifies for the per-column climb when every span column is
+    // still building shell: vertical facade art or the cap trim closing it.
+    // A canopy, hedge, or plain-ground column breaks the shell — the band
+    // front is embedded in unrelated art (Fortree tree houses), and
+    // climbing individual columns there extrudes what must stay flat.
+    for (u32 x = startX; x <= endX; x++)
+    {
+        const u32 index = row * sampleCols + x;
+
+        if (HdMapSampleHasFacadeSupport(index, sampleCols, sampleRows))
+            continue;
+        if (HdMapSampleIsFacadeStackCourse(index, sampleCols, sampleRows))
+            continue;
+        if (HdMapSampleIsRoofCapCourse(index, sampleCols, sampleRows))
+            continue;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static u32 HdBandColumnWallStartCourse(const struct HdFacadeBand *band, u32 courseX,
+                                       u32 wallStartCourse, u32 sampleCols,
+                                       u32 sampleRows, bool8 isSteppedTier)
+{
+    const u32 sampleX = courseX / 2;
+    u32 topRow;
+
+    // Only a band attached as a stepped tier climbs per column. Its row-level
+    // climb stops when the row above mixes roof-cap trim (outer cornice
+    // wedges) with plain facade art (window and sign bands): the whole row
+    // neither continues the facade nor floods as roof. The facade columns of
+    // such a mixed row are still vertical wall sheet; climb them per column
+    // so no course is orphaned between wall and roof claims. Entrance bands
+    // keep the row-level answer: covered-layer fronts embedded in obstacle
+    // art (Fortree tree houses, canopy platforms) satisfy every per-column
+    // predicate yet must stay flat sheets.
+    if (!isSteppedTier)
+        return wallStartCourse;
+    topRow = band->wallTop;
+    while (topRow > 1 && band->wallTop - topRow < HD2D_GEOMETRY_RADIUS
+        && HdMapRowIsFacadeOrCap(topRow - 1, band->spanStart, band->spanEnd,
+                                 sampleCols, sampleRows)
+        && HdMapSampleIsCoveredCourse((topRow - 1) * sampleCols + sampleX)
+        && HdMapSampleIsFacadeStackCourse((topRow - 1) * sampleCols + sampleX,
+                                          sampleCols, sampleRows)
+        && !HdMapSampleIsPropColumn((topRow - 1) * sampleCols + sampleX,
+                                    sampleCols, sampleRows))
+        topRow--;
+    if (topRow == band->wallTop)
+        return wallStartCourse;
+    // The climb is only justified when it reaches the shell's own cap: the
+    // row above the new top must be roof-cap art for this column. A wing
+    // that climbs toward fence or plaza art behind the building (Petalburg
+    // PC rear rows) keeps the row-level answer instead.
+    if (topRow < 2
+     || !HdMapSampleIsRoofCapCourse((topRow - 1) * sampleCols + sampleX,
+                                    sampleCols, sampleRows))
+        return wallStartCourse;
+    // The extended column keeps the multi-row convention: its top row
+    // contributes only the south course; the north half is the roof/facade
+    // contact-shadow course bridged onto the roof plane below.
+    return topRow * 2 + 1;
+}
+
 static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
                                u32 sampleRows, const struct HdBuildingBounds *bounds,
                                bool8 isSteppedTier)
@@ -3033,9 +3223,37 @@ static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
     const u32 spanStartCourse = band->spanStart * 2;
     const u32 spanEndCourse = (band->spanEnd + 1) * 2;
     const u32 supportCourse = ((y + 1) * 2) * courseCols + (band->coreStart + band->coreEnd + 1);
-    const s16 roofHeight = sHdCourseGroundHeights[supportCourse]
-                         + (wallEndCourse - wallStartCourse) * HD2D_COURSE_HEIGHT;
+    u32 minStartCourse = wallStartCourse;
+    s16 tierCeiling = -1;
+    bool8 climb = FALSE;
+    s16 roofHeight;
     u16 building;
+
+    if (isSteppedTier)
+    {
+        tierCeiling = HdBandAdjacentClaimedRoofHeight(band, sampleCols, sampleRows);
+        climb = tierCeiling > 0;
+    }
+    if (climb)
+    {
+        for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
+        {
+            const u32 columnStart = HdBandColumnWallStartCourse(band, courseX, wallStartCourse,
+                                                                sampleCols, sampleRows, TRUE);
+            if (columnStart < minStartCourse)
+                minStartCourse = columnStart;
+        }
+        // A wing that would rise to meet or pass the shell it leans on is
+        // not a lower tier of that shell; keep its row-level claims.
+        if (sHdCourseGroundHeights[supportCourse]
+          + (s16)((wallEndCourse - minStartCourse) * HD2D_COURSE_HEIGHT) >= tierCeiling)
+        {
+            minStartCourse = wallStartCourse;
+            climb = FALSE;
+        }
+    }
+    roofHeight = sHdCourseGroundHeights[supportCourse]
+               + (wallEndCourse - minStartCourse) * HD2D_COURSE_HEIGHT;
 
     if (sHdBuildingCount >= ARRAY_COUNT(sHdBuildings) || roofHeight > 127)
         return FALSE;
@@ -3044,17 +3262,21 @@ static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
     building = sHdBuildingCount++;
     sHdBuildings[building].parent = building;
     sHdBuildings[building].componentId = 0;
-    sHdBuildings[building].facadeAnchorCourseY = wallStartCourse;
+    sHdBuildings[building].facadeAnchorCourseY = minStartCourse;
     sHdBuildings[building].baseHeight = sHdCourseGroundHeights[supportCourse];
     sHdBuildings[building].roofHeight = roofHeight;
     sHdBuildings[building].hasEntrance = TRUE;
     sHdBuildings[building].isClipped = band->spanStart == 0 || band->spanEnd + 1 == sampleCols;
     sHdBuildings[building].isSteppedTier = isSteppedTier;
+    sHdBuildings[building].tierCeiling = tierCeiling;
 
-    for (u32 courseY = wallStartCourse; courseY < wallEndCourse; courseY++)
+    for (u32 courseY = minStartCourse; courseY < wallEndCourse; courseY++)
     {
         for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
         {
+            if (courseY < HdBandColumnWallStartCourse(band, courseX, wallStartCourse,
+                                                      sampleCols, sampleRows, climb))
+                continue;
             if (HdCourseIsRoofArt(courseX, courseY, sampleCols, sampleRows))
                 continue;
             // Prop stacks standing inside a recessed span (courtyard
@@ -3071,34 +3293,34 @@ static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
     // the metatile immediately above is the roof cap, its nearest course is
     // two courses north; seed it as well as the intervening contact-shadow row.
     // The roof predicate still decides which of these seeds may be claimed.
-    if (wallStartCourse > 1)
+    // Stepped tiers may raise individual columns above the band's wall top,
+    // so every column bridges its own contact course at its own start.
+    for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
     {
-        HdFloodBuildingRoof(building, wallStartCourse - 2, spanStartCourse,
-                            spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
+        const u32 columnStart = HdBandColumnWallStartCourse(band, courseX, wallStartCourse,
+                                                            sampleCols, sampleRows, climb);
+        if (columnStart <= 1)
+            continue;
         // The north half of this facade row is the horizontal contact course
         // between a cap in the preceding metatile and the vertical wall below.
         // It is not independently recognizable as roof art, but must bridge
         // the proven cap to the facade so their physical planes meet.
-        for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
+        if (HdCourseIsRoofArt(courseX, columnStart - 2, sampleCols, sampleRows)
+         && HdCourseHasVisibleArt(courseX, columnStart - 1, sampleCols)
+         && HdCourseColumnSupportsRoofClaim(courseX, columnStart - 1,
+                                            courseCols, sampleCols, sampleRows))
         {
-            if (HdCourseIsRoofArt(courseX, wallStartCourse - 2, sampleCols, sampleRows)
-             && HdCourseHasVisibleArt(courseX, wallStartCourse - 1, sampleCols)
-             && HdCourseColumnSupportsRoofClaim(courseX, wallStartCourse - 1,
-                                                courseCols, sampleCols, sampleRows))
-            {
-                HdClaimBuildingCourse(courseX, wallStartCourse - 1, courseCols,
-                                      building, HD_BUILDING_ROOF);
-                if (HdCourseTouchesBuildingBoundary(courseX, wallStartCourse - 1,
-                                                    courseCols, bounds))
-                    sHdBuildings[building].isClipped = TRUE;
-            }
+            HdClaimBuildingCourse(courseX, columnStart - 1, courseCols,
+                                  building, HD_BUILDING_ROOF);
+            if (HdCourseTouchesBuildingBoundary(courseX, columnStart - 1,
+                                                courseCols, bounds))
+                sHdBuildings[building].isClipped = TRUE;
         }
     }
-    if (wallStartCourse > 0)
-        HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
+    for (u32 seedY = minStartCourse > 2 ? minStartCourse - 2 : 0;
+         seedY <= wallStartCourse; seedY++)
+        HdFloodBuildingRoof(building, seedY, spanStartCourse,
                             spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
-    HdFloodBuildingRoof(building, wallStartCourse, spanStartCourse,
-                        spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
     return TRUE;
 }
 

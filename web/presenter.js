@@ -1346,10 +1346,18 @@ class WebGpuPresenter {
         const topTy = group.topByColumn.get(tx);
         if (topTy === undefined || ty < topTy) group.topByColumn.set(tx, ty);
       }
+      // A stepped tier can carry columns of different wall depth (a window
+      // band beside a cornice column). Each roof column rides on ITS wall
+      // column's top so cornices stay flush with the facade instead of
+      // overhanging the plaza by the deepest column's shift.
+      component.slideShiftByColumn = new Map();
       for (const group of groups.values()) {
-        for (const topTy of group.topByColumn.values())
-          component.frontShift = Math.max(component.frontShift,
-                                          group.maxTy + 1 - topTy);
+        for (const [tx, topTy] of group.topByColumn) {
+          const shift = group.maxTy + 1 - topTy;
+          component.frontShift = Math.max(component.frontShift, shift);
+          component.slideShiftByColumn.set(tx,
+            Math.max(component.slideShiftByColumn.get(tx) ?? 0, shift));
+        }
       }
       if (!component.frontShift || !component.roofCells.length) continue;
       let northTy = Infinity;
@@ -1364,8 +1372,10 @@ class WebGpuPresenter {
           / (southTy - northTy);
       }
     }
-    const roofMapTy = (component, ty) => component.slideRoof
-      ? ty + component.frontShift
+    const roofColumnShift = (component, tx) =>
+      component.slideShiftByColumn?.get(tx) ?? component.frontShift;
+    const roofMapTy = (component, tx, ty) => component.slideRoof
+      ? ty + roofColumnShift(component, tx)
       : component.roofNorthTy + (ty - component.roofNorthTy) * component.roofStretch;
     // Query transformed roof occupancy rather than the source grid when one
     // tier closes against another. Otherwise a tall tier drops its generated
@@ -1382,8 +1392,8 @@ class WebGpuPresenter {
           physicalRoofColumns.set(tx, intervals);
         }
         intervals.push({
-          y0: roofMapTy(component, ty),
-          y1: roofMapTy(component, ty + 1),
+          y0: roofMapTy(component, tx, ty),
+          y1: roofMapTy(component, tx, ty + 1),
           height: heightAt(tx, ty),
         });
       }
@@ -1416,10 +1426,16 @@ class WebGpuPresenter {
 
         const word = geometry[start];
         const height = heights[start];
+        const startComponent = surfaceAt(tx, ty) === HD2D_SURFACE_ROOF && componentAt(tx, ty) !== 0
+          ? components.get(componentAt(tx, ty)) : null;
         let width = 1;
         while (tx + width < cols) {
           const tile = ty * cols + tx + width;
           if (visited[tile] || geometry[tile] !== word || heights[tile] !== height) break;
+          // Per-column slide breaks physical continuity between source
+          // neighbors; a merged rectangle must share one shift.
+          if (startComponent?.slideRoof
+              && roofColumnShift(startComponent, tx + width) !== roofColumnShift(startComponent, tx)) break;
           width++;
         }
         let depth = 1;
@@ -1464,10 +1480,10 @@ class WebGpuPresenter {
           topV0 = textureV(capY);
           topV1 = textureV(capY + 1);
         }
-        const roofComponent = shell ? components.get(componentAt(tx, ty)) : null;
-        const zTop = worldZ(roofComponent ? roofMapTy(roofComponent, ty) : ty);
+        const roofComponent = shell ? startComponent : null;
+        const zTop = worldZ(roofComponent ? roofMapTy(roofComponent, tx, ty) : ty);
         const zBottom = worldZ(roofComponent
-          ? roofMapTy(roofComponent, ty + depth) : ty + depth);
+          ? roofMapTy(roofComponent, tx, ty + depth) : ty + depth);
         quad(
           [worldX(tx), height, zTop, textureU(tx), topV0],
           [worldX(tx + width), height, zTop, textureU(tx + width), topV0],
@@ -1619,6 +1635,7 @@ class WebGpuPresenter {
       let top = component.roofHeight;
       if (!Number.isFinite(top)) top = component.base + TILE_SIZE;
       const side = component.wallBody || component.sideMaterial || [0, 0, 0];
+      component.wallTopHeightByColumn = new Map();
       for (const group of groups.values()) {
         const maxOffset = Math.max(...group.cells.map(([, , offset]) => offset));
         if (!Number.isFinite(component.roofHeight))
@@ -1638,6 +1655,8 @@ class WebGpuPresenter {
         for (const [tx, ty, offset] of group.cells) {
           const courseTop = top - offset * TILE_SIZE;
           const courseBottom = courseTop - TILE_SIZE;
+          if (courseTop > (component.wallTopHeightByColumn.get(tx) ?? -Infinity))
+            component.wallTopHeightByColumn.set(tx, courseTop);
           quad(
             [worldX(tx),courseBottom,z,textureU(tx),textureV(ty + 1)],
             [worldX(tx + 1),courseBottom,z,textureU(tx + 1),textureV(ty + 1)],
@@ -1671,16 +1690,20 @@ class WebGpuPresenter {
         if (roofOverhangAt(tx, ty)
             || !component.roofClosureCells.has(roofCellKey(tx, ty))) continue;
         const height = heightAt(tx, ty);
-        const z0 = worldZ(roofMapTy(component, ty));
-        const z1 = worldZ(roofMapTy(component, ty + 1));
+        const z0 = worldZ(roofMapTy(component, tx, ty));
+        const z1 = worldZ(roofMapTy(component, tx, ty + 1));
         const closure = (a, b, c, d, normal) => quad(a, b, c, d, normal,
           MATERIAL_NEUTRAL_BUILDING, 1, component.base, component.sideMaterial);
         for (const dx of [-1, 1]) {
+          // Source-adjacent same-roof cells stay interior even when their
+          // columns slide by different amounts: the staggered rear sliver is
+          // an 8px edge at most, while closing it drops a full-height
+          // curtain wherever nothing covers the neighbor's vacated rows.
           if (sameRoof(tx + dx, ty, component.id)) continue;
           if (inGrid(tx + dx, ty) && surfaceAt(tx + dx, ty) === HD2D_SURFACE_WALL
               && componentAt(tx + dx, ty) === component.id) continue;
-          const physicalY0 = roofMapTy(component, ty);
-          const physicalY1 = roofMapTy(component, ty + 1);
+          const physicalY0 = roofMapTy(component, tx, ty);
+          const physicalY1 = roofMapTy(component, tx, ty + 1);
           const cuts = [physicalY0, physicalY1];
           for (const interval of physicalRoofColumns.get(tx + dx) || []) {
             if (interval.y1 <= physicalY0 || interval.y0 >= physicalY1) continue;
@@ -1709,8 +1732,24 @@ class WebGpuPresenter {
         for (const dy of [-1, 1]) {
           if (sameRoof(tx, ty + dy, component.id)) continue;
           if (inGrid(tx, ty + dy) && componentAt(tx, ty + dy) === component.id
-              && surfaceAt(tx, ty + dy) === HD2D_SURFACE_WALL) continue;
-          const edgeY = roofMapTy(component, dy < 0 ? ty : ty + 1);
+              && surfaceAt(tx, ty + dy) === HD2D_SURFACE_WALL) {
+            // A slab riding a wall column shorter than the tier height (a
+            // cornice column beside a deeper window column) still exposes
+            // the strip between that wall's top and the slab. Fill it at
+            // the facade line; a full-height wall needs nothing.
+            const wallTop = component.wallTopHeightByColumn?.get(tx) ?? height;
+            // Only seal the course-sized seam a cornice column opens beside
+            // a deeper neighbor. A wall top far below the slab is a facade
+            // authored against overlapping art; a big neutral quad there
+            // reads as a curtain (Lilycove), not a seam fill.
+            if (dy < 0 || !component.slideRoof || wallTop >= height
+                || height - wallTop > TILE_SIZE) continue;
+            closure([worldX(tx), wallTop, z1, 0, 0], [worldX(tx + 1), wallTop, z1, 0, 0],
+                    [worldX(tx + 1), height, z1, 0, 0], [worldX(tx), height, z1, 0, 0],
+                    [0, 0, 1]);
+            continue;
+          }
+          const edgeY = roofMapTy(component, tx, dy < 0 ? ty : ty + 1);
           const neighborY = edgeY + dy * 1e-3;
           const bottom = Math.max(component.base, physicalReceiverHeightAt(tx, neighborY),
                                   physicalRoofHeightAt(tx, neighborY));
