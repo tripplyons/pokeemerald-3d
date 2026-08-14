@@ -1259,41 +1259,6 @@ class WebGpuPresenter {
           (facadeAt(tx, ty) & HD2D_FACADE_STEPPED_TIER) !== 0))
         steppedComponents.add(component.id);
     }
-    // A high stepped tier must close onto a directly adjoining lower tier,
-    // even when their authored roof rows become staggered after projection.
-    // Keep the fallback local to that exact source-space component edge: a
-    // transitive tier elsewhere in the shell must not suppress exposed sides.
-    const tierNeighbors = new Map(Array.from(steppedComponents,
-      (id) => [id, new Set()]));
-    for (const id of steppedComponents) {
-      const component = components.get(id);
-      for (const [tx, ty] of component.wallCells) {
-        for (const dx of [-1, 1]) {
-          const neighbor = componentAt(tx + dx, ty);
-          if (steppedComponents.has(neighbor) && neighbor !== id) {
-            tierNeighbors.get(id).add(neighbor);
-            tierNeighbors.get(neighbor).add(id);
-          }
-        }
-      }
-    }
-    for (const id of steppedComponents) {
-      const component = components.get(id);
-      component.tierSupportByColumn = new Map();
-      for (const neighborId of tierNeighbors.get(id)) {
-        const neighbor = components.get(neighborId);
-        // Only a lower adjoining roof supports this side. Letting the high tier
-        // suppress the lower tier's closure can erase a legitimate outer face.
-        if (neighbor.roofHeight >= component.roofHeight) continue;
-        for (const [tx] of [...neighbor.roofCells, ...neighbor.wallCells])
-          component.tierSupportByColumn.set(tx,
-            Math.max(component.tierSupportByColumn.get(tx) ?? -Infinity,
-                     neighbor.roofHeight));
-      }
-    }
-    const tierColumnRoofHeight = (component, tx) =>
-      component.tierSupportByColumn?.get(tx) ?? -Infinity;
-
     // A disconnected roof-art island with no wall beneath it is decorative
     // map art, not another box belonging to the nearby building. Its masked
     // horizontal pixels may remain, but a generated perimeter would turn an
@@ -1359,6 +1324,33 @@ class WebGpuPresenter {
             Math.max(component.slideShiftByColumn.get(tx) ?? 0, shift));
         }
       }
+      // Sliding a tier's slab rigidly vacates its authored rear rows, and the
+      // exposed ground there reads as a hole through the building wherever a
+      // sightline clears a lower adjoining tier. Pin each column's authored
+      // north edge instead and stretch to the same slid front line. Only the
+      // column's southmost contiguous run stretches: a detached island behind
+      // it (a Fortree walkway stub under its canopy) keeps the rigid slide,
+      // or the stretch would pull it back beneath the art it must stand
+      // clear of.
+      component.roofSpanByColumn = new Map();
+      if (component.slideRoof) {
+        const rowsByColumn = new Map();
+        for (const [tx, ty] of component.roofCells) {
+          let list = rowsByColumn.get(tx);
+          if (!list) rowsByColumn.set(tx, list = []);
+          list.push(ty);
+        }
+        for (const [tx, list] of rowsByColumn) {
+          list.sort((a, b) => a - b);
+          let north = list[list.length - 1];
+          for (let i = list.length - 2; i >= 0; i--) {
+            if (list[i] !== north - 1) break;
+            north = list[i];
+          }
+          component.roofSpanByColumn.set(tx,
+            { north, south: list[list.length - 1] + 1 });
+        }
+      }
       if (!component.frontShift || !component.roofCells.length) continue;
       let northTy = Infinity;
       let southTy = -Infinity;
@@ -1374,9 +1366,16 @@ class WebGpuPresenter {
     }
     const roofColumnShift = (component, tx) =>
       component.slideShiftByColumn?.get(tx) ?? component.frontShift;
-    const roofMapTy = (component, tx, ty) => component.slideRoof
-      ? ty + roofColumnShift(component, tx)
-      : component.roofNorthTy + (ty - component.roofNorthTy) * component.roofStretch;
+    const roofMapTy = (component, tx, ty) => {
+      if (!component.slideRoof)
+        return component.roofNorthTy + (ty - component.roofNorthTy) * component.roofStretch;
+      const shift = roofColumnShift(component, tx);
+      const span = component.roofSpanByColumn?.get(tx);
+      if (!shift || !span || span.south <= span.north
+          || ty < span.north || ty > span.south) return ty + shift;
+      const stretch = (span.south + shift - span.north) / (span.south - span.north);
+      return span.north + (ty - span.north) * stretch;
+    };
     // Query transformed roof occupancy rather than the source grid when one
     // tier closes against another. Otherwise a tall tier drops its generated
     // side to the ground through the lower roof simply because their authored
@@ -1432,10 +1431,11 @@ class WebGpuPresenter {
         while (tx + width < cols) {
           const tile = ty * cols + tx + width;
           if (visited[tile] || geometry[tile] !== word || heights[tile] !== height) break;
-          // Per-column slide breaks physical continuity between source
-          // neighbors; a merged rectangle must share one shift.
+          // Per-column stretch breaks physical continuity between source
+          // neighbors; a merged rectangle must share one mapping.
           if (startComponent?.slideRoof
-              && roofColumnShift(startComponent, tx + width) !== roofColumnShift(startComponent, tx)) break;
+              && (roofMapTy(startComponent, tx + width, ty) !== roofMapTy(startComponent, tx, ty)
+                || roofMapTy(startComponent, tx + width, ty + 1) !== roofMapTy(startComponent, tx, ty + 1))) break;
           width++;
         }
         let depth = 1;
@@ -1687,7 +1687,12 @@ class WebGpuPresenter {
         // the building footprint below it. Its supported neighbor closes the
         // real shell; dropping this exposed perimeter to ground creates the
         // long side-wall curtains visible beside actors walking behind it.
-        if (roofOverhangAt(tx, ty)
+        // Stretched tier slabs are the exception laterally: their overhang
+        // rows are the building's own top-rear courses, physically south of
+        // the rear walkway, and leaving their sides open cuts a through-hole
+        // above an adjoining lower tier's roof.
+        const overhang = roofOverhangAt(tx, ty);
+        if ((overhang && !component.slideRoof)
             || !component.roofClosureCells.has(roofCellKey(tx, ty))) continue;
         const height = heightAt(tx, ty);
         const z0 = worldZ(roofMapTy(component, tx, ty));
@@ -1717,10 +1722,13 @@ class WebGpuPresenter {
             const segmentY1 = cuts[index + 1];
             if (segmentY1 - segmentY0 < 1e-6) continue;
             const physicalMidY = (segmentY0 + segmentY1) / 2;
+            // Stretched tier slabs cover their full authored footprint, so
+            // physical roof occupancy already says where a lower adjoining
+            // tier supports this side. A column-wide tier clamp would float
+            // the closure above open ground in front of the lower tier.
             const bottom = Math.max(component.base,
                                     physicalReceiverHeightAt(tx + dx, physicalMidY),
-                                    physicalRoofHeightAt(tx + dx, physicalMidY),
-                                    tierColumnRoofHeight(component, tx + dx));
+                                    physicalRoofHeightAt(tx + dx, physicalMidY));
             if (bottom >= height) continue;
             const segmentZ0 = worldZ(segmentY0);
             const segmentZ1 = worldZ(segmentY1);
@@ -1730,6 +1738,9 @@ class WebGpuPresenter {
           }
         }
         for (const dy of [-1, 1]) {
+          // Overhang rows never close front/back: the rear stays open over
+          // the walkway behind, exactly as before stretch.
+          if (overhang) continue;
           if (sameRoof(tx, ty + dy, component.id)) continue;
           if (inGrid(tx, ty + dy) && componentAt(tx, ty + dy) === component.id
               && surfaceAt(tx, ty + dy) === HD2D_SURFACE_WALL) {
