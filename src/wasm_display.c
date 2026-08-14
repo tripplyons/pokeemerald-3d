@@ -1881,7 +1881,6 @@ static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
      && sampleY > 0
      && HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows)
      && (HdMapSampleIsCoveredCourse(south) || HdMapSampleIsDoorCourse(south))
-     && sHdMapSamples[sample - sampleCols].collision
      && HdMapSampleIsDecorativeOverlay(sample - sampleCols)
      && HdMapSampleIsStructuralMaterial(sample - sampleCols))
     {
@@ -1890,7 +1889,9 @@ static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
         // (recessed storefronts, canopy kiosks): panel borders and front
         // eave arcs authored in 3/4 view. The whole row is cap art — the
         // vertical facade is the covered/door row beneath it — so the roof
-        // keeps its closing border when stretched to the front line.
+        // keeps its closing border when stretched to the front line. The
+        // decorative sheet may be a non-blocking, ground-underlaid rear cap;
+        // its art contract, not collision, proves the transition.
         // Cottage bodies keep NORMAL or COVERED art above (their roof rows
         // are baked sheets, not decorative overlays) and stay wall.
         return TRUE;
@@ -3062,6 +3063,13 @@ static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
                 sHdBuildings[building].isClipped = TRUE;
         }
     }
+    // A multi-row wall starts on the south half of its top facade row. When
+    // the metatile immediately above is the roof cap, its nearest course is
+    // two courses north; seed it as well as the intervening contact-shadow row.
+    // The roof predicate still decides which of these seeds may be claimed.
+    if (wallStartCourse > 1)
+        HdFloodBuildingRoof(building, wallStartCourse - 2, spanStartCourse,
+                            spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
     if (wallStartCourse > 0)
         HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
                             spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
