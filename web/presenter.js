@@ -17,6 +17,7 @@ const HD2D_RECEIVER_OFFSET_BIAS = 16;
 const HD2D_RECEIVER_OFFSET_MASK = 31;
 const HD2D_RECEIVER_DX_SHIFT = HD2D_SURFACE_BITS;
 const HD2D_RECEIVER_DY_SHIFT = 8;
+const HD2D_FACADE_ROOF_OVERHANG = 0x80000000;
 
 const FULLSCREEN_VERTEX = /* wgsl */ `
 struct VertexOutput {
@@ -1037,6 +1038,8 @@ class WebGpuPresenter {
     const geometryAt = (x, y) => inGrid(x, y) ? geometry[y * cols + x] : 0;
     const receiverAt = (x, y) => inGrid(x, y) ? receivers[y * cols + x] : 0;
     const facadeAt = (x, y) => inGrid(x, y) ? facades[y * cols + x] : 0;
+    const roofOverhangAt = (x, y) =>
+      (facadeAt(x, y) & HD2D_FACADE_ROOF_OVERHANG) !== 0;
     const surfaceAt = (x, y) => geometryAt(x, y) & HD2D_SURFACE_MASK;
     const componentAt = (x, y) => geometryAt(x, y) >> HD2D_COMPONENT_SHIFT;
     const worldX = (x) => originX + x * TILE_SIZE - halfW;
@@ -1543,6 +1546,11 @@ class WebGpuPresenter {
       // samples the atlas, so the faces are emitted directly at fractional
       // stretched positions instead of through verticalSide's integer grid.
       for (const [tx, ty] of component.roofCells) {
+        // A non-blocking rear gable extends the horizontal roof art but not
+        // the building footprint below it. Its supported neighbor closes the
+        // real shell; dropping this exposed perimeter to ground creates the
+        // long side-wall curtains visible beside actors walking behind it.
+        if (roofOverhangAt(tx, ty)) continue;
         const height = heightAt(tx, ty);
         const z0 = worldZ(roofMapTy(component, ty));
         const z1 = worldZ(roofMapTy(component, ty + 1));

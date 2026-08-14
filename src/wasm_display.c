@@ -48,6 +48,7 @@ extern void WasmApplyTilesetAnimations(const struct Tileset *tileset, u8 *dest, 
 #define HD2D_RECEIVER_OFFSET_BIAS 16
 #define HD2D_RECEIVER_DX_SHIFT HD2D_SURFACE_BITS
 #define HD2D_RECEIVER_DY_SHIFT 8
+#define HD2D_FACADE_ROOF_OVERHANG 0x80000000
 #define HD2D_BUILDING_COUNT (HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS)
 #define HD2D_WORLD_OFFSET_X ((HD2D_WORLD_WIDTH - DISPLAY_WIDTH) / 2)
 #define HD2D_WORLD_OFFSET_Y ((HD2D_WORLD_HEIGHT - DISPLAY_HEIGHT) / 2)
@@ -3271,7 +3272,20 @@ static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
         sHdCourseGroundHeights[course] = sHdBuildings[root].baseHeight;
         sHdCourseHeights[course] = surface == HD_SURFACE_ROOF
             ? sHdBuildings[root].roofHeight : sHdBuildings[root].baseHeight;
-        if (surface == HD_SURFACE_WALL && sHdCourseFacade[course] >= 0)
+        if (surface == HD_SURFACE_ROOF)
+        {
+            const u32 courseX = course % courseCols;
+            const u32 courseY = course / courseCols;
+            const u32 sample = (courseY / 2) * (courseCols / 2) + courseX / 2;
+
+            // Decorative rear gables sit over non-blocking ground so actors
+            // can walk behind the native top-down art. Publish that support
+            // contract with the building metadata: their roof sheet remains
+            // elevated, but it must not grow a generated wall down to ground.
+            if (!sHdMapSamples[sample].collision)
+                sHdCourseFacadeData[course] = HD2D_FACADE_ROOF_OVERHANG;
+        }
+        else if (sHdCourseFacade[course] >= 0)
         {
             const u16 facade = sHdCourseFacade[course];
 
