@@ -1618,6 +1618,8 @@ static bool8 HdMapSamplePlane0IsFloorArt(u32 index);
 static bool8 HdMapSampleIsFoliageArt(u32 index);
 static bool8 HdMapSampleHasFacadeSupport(u32 index, u32 sampleCols, u32 sampleRows);
 static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows);
+static bool8 HdCourseIsRoofArt(u32 courseX, u32 courseY, u32 sampleCols,
+                               u32 sampleRows);
 
 static bool8 HdMapSampleMatchesWalkableFront(u32 index, u32 sampleCols, u32 sampleRows)
 {
@@ -1841,17 +1843,31 @@ static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
     const u32 sampleX = courseX / 2;
     const u32 sampleY = courseY / 2;
     const u32 sample = sampleY * sampleCols + sampleX;
+    const u8 quadrant = (courseY & 1) * 2 + (courseX & 1);
     const u32 south = sampleY + 1 < sampleRows
         ? (sampleY + 1) * sampleCols + sampleX : sample;
+    const bool8 extendsRoof = courseY + 2 < sampleRows * 2
+        && sHdMapSamples[sample].valid
+        && !sHdMapSamples[sample].collision
+        && HdMetatileQuadrantCoverage(&sHdMapSamples[sample], 1, quadrant) != 0
+        && HdMapSampleIsDecorativeOverlay(sample)
+        && HdMapSampleIsStructuralMaterial(sample)
+        && !HdMapSampleIsFoliageArt(sample)
+        && HdCourseIsRoofArt(courseX, courseY + 2, sampleCols, sampleRows);
 
     // Landmark roofs are authored caps on a facade. Collision top-art also
-    // covers hedges and planter rims; green overlays stay on the ground.
+    // covers hedges and planter rims; green overlays stay on the ground. A
+    // non-blocking decorative course may continue proven roof art immediately
+    // south: rear gables use walkable ground underlay so actors can pass behind
+    // the building, but their exact top-plane quadrants belong to the cap.
     if (!HdCourseHasVisibleArt(courseX, courseY, sampleCols)
-     || !sHdMapSamples[sample].collision
+     || (!sHdMapSamples[sample].collision && !extendsRoof)
      || !HdMapSampleIsStructuralMaterial(sample)
-     || HdMapSampleIsFloorSurface(sample, sampleCols, sampleRows)
+     || (HdMapSampleIsFloorSurface(sample, sampleCols, sampleRows) && !extendsRoof)
      || HdMapSampleIsDoorCourse(sample))
         return FALSE;
+    if (extendsRoof)
+        return TRUE;
     if (HdMapSampleIsFoliageArt(sample))
     {
         // Leafy house caps sit on a NORMAL gable row. Green posts on a
