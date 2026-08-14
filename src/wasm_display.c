@@ -3072,8 +3072,28 @@ static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
     // two courses north; seed it as well as the intervening contact-shadow row.
     // The roof predicate still decides which of these seeds may be claimed.
     if (wallStartCourse > 1)
+    {
         HdFloodBuildingRoof(building, wallStartCourse - 2, spanStartCourse,
                             spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
+        // The north half of this facade row is the horizontal contact course
+        // between a cap in the preceding metatile and the vertical wall below.
+        // It is not independently recognizable as roof art, but must bridge
+        // the proven cap to the facade so their physical planes meet.
+        for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
+        {
+            if (HdCourseIsRoofArt(courseX, wallStartCourse - 2, sampleCols, sampleRows)
+             && HdCourseHasVisibleArt(courseX, wallStartCourse - 1, sampleCols)
+             && HdCourseColumnSupportsRoofClaim(courseX, wallStartCourse - 1,
+                                                courseCols, sampleCols, sampleRows))
+            {
+                HdClaimBuildingCourse(courseX, wallStartCourse - 1, courseCols,
+                                      building, HD_BUILDING_ROOF);
+                if (HdCourseTouchesBuildingBoundary(courseX, wallStartCourse - 1,
+                                                    courseCols, bounds))
+                    sHdBuildings[building].isClipped = TRUE;
+            }
+        }
+    }
     if (wallStartCourse > 0)
         HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
                             spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
