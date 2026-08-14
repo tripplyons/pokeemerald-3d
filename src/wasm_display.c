@@ -2035,6 +2035,13 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
         && sHdMapSamples[probe + sampleCols].valid
         && sHdMapSamples[probe + sampleCols].collision)
         probe += sampleCols;
+    // A doorway's flanking wall bays (cottage window strips) carry no
+    // covered art in their own run; the door beside the run base proves the
+    // column is facade, not a free-standing prop stack.
+    if (probe % sampleCols > 0 && HdMapSampleIsDoorCourse(probe - 1))
+        return FALSE;
+    if (probe % sampleCols + 1 < sampleCols && HdMapSampleIsDoorCourse(probe + 1))
+        return FALSE;
     while (probe >= sampleCols)
     {
         if (!sHdMapSamples[probe].valid)
@@ -2974,10 +2981,127 @@ static void HdFloodBuildingRoof(u16 building, u32 seedY, u32 spanStart,
     }
 }
 
+struct HdFacadeBand
+{
+    u16 y;
+    u16 spanStart;
+    u16 spanEnd;
+    u16 coreStart;
+    u16 coreEnd;
+    u16 wallTop;
+    bool8 hasEntrance;
+    bool8 claimed;
+};
+
+static struct HdFacadeBand sHdFacadeBands[HD2D_BUILDING_COUNT];
+
+static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
+                               u32 sampleRows, const struct HdBuildingBounds *bounds)
+{
+    const u32 courseCols = sampleCols * 2;
+    const u32 y = band->y;
+    // The north half of a multi-row facade's top row is the roof/facade
+    // contact-shadow course in the authored top-down tile, not vertical wall
+    // art. Starting at the south half keeps that shadow on the horizontal
+    // roof plane instead of turning it into detached black feet. A 1-row
+    // facade IS the storefront: door, sign, and window art fill the whole
+    // entrance metatile, so both of its courses stand as wall and the roof
+    // flood seeds from the solid cap row above instead.
+    const u32 wallStartCourse = band->wallTop == y ? band->wallTop * 2 : band->wallTop * 2 + 1;
+    const u32 wallEndCourse = y * 2 + 2;
+    const u32 spanStartCourse = band->spanStart * 2;
+    const u32 spanEndCourse = (band->spanEnd + 1) * 2;
+    const u32 supportCourse = ((y + 1) * 2) * courseCols + (band->coreStart + band->coreEnd + 1);
+    const s16 roofHeight = sHdCourseGroundHeights[supportCourse]
+                         + (wallEndCourse - wallStartCourse) * HD2D_COURSE_HEIGHT;
+    u16 building;
+
+    if (sHdBuildingCount >= ARRAY_COUNT(sHdBuildings) || roofHeight > 127)
+        return FALSE;
+
+    band->claimed = TRUE;
+    building = sHdBuildingCount++;
+    sHdBuildings[building].parent = building;
+    sHdBuildings[building].componentId = 0;
+    sHdBuildings[building].facadeAnchorCourseY = wallStartCourse;
+    sHdBuildings[building].baseHeight = sHdCourseGroundHeights[supportCourse];
+    sHdBuildings[building].roofHeight = roofHeight;
+    sHdBuildings[building].hasEntrance = TRUE;
+    sHdBuildings[building].isClipped = band->spanStart == 0 || band->spanEnd + 1 == sampleCols;
+
+    for (u32 courseY = wallStartCourse; courseY < wallEndCourse; courseY++)
+    {
+        for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
+        {
+            if (HdCourseIsRoofArt(courseX, courseY, sampleCols, sampleRows))
+                continue;
+            // Prop stacks standing inside a recessed span (courtyard
+            // shelves, planters) support the row contract but are
+            // plaza furniture, not wall sheet.
+            if (HdMapSampleIsPropColumn(y * sampleCols + courseX / 2, sampleCols, sampleRows))
+                continue;
+            HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
+            if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
+                sHdBuildings[building].isClipped = TRUE;
+        }
+    }
+    if (wallStartCourse > 0)
+        HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
+                            spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
+    HdFloodBuildingRoof(building, wallStartCourse, spanStartCourse,
+                        spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
+    return TRUE;
+}
+
+static bool8 HdBandTouchesClaimedWall(const struct HdFacadeBand *band, u32 sampleCols,
+                                      u32 sampleRows)
+{
+    const u32 courseCols = sampleCols * 2;
+    const u32 courseRows = sampleRows * 2;
+    const u32 wallStartCourse = band->wallTop == band->y
+        ? band->wallTop * 2 : band->wallTop * 2 + 1;
+    const u32 x0 = band->spanStart * 2 > 0 ? band->spanStart * 2 - 1 : 0;
+    const u32 x1 = (band->spanEnd + 1) * 2 < courseCols
+        ? (band->spanEnd + 1) * 2 : courseCols - 1;
+    const u32 y0 = wallStartCourse > 0 ? wallStartCourse - 1 : 0;
+    const u32 y1 = band->y * 2 + 2 < courseRows ? band->y * 2 + 2 : courseRows - 1;
+
+    for (u32 courseY = y0; courseY <= y1; courseY++)
+    {
+        for (u32 courseX = x0; courseX <= x1; courseX++)
+        {
+            const u32 course = courseY * courseCols + courseX;
+
+            if (sHdCourseBuilding[course] >= 0
+             && (sHdCourseBuildingKind[course] & HD_BUILDING_WALL))
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static bool8 HdBandHasAttachableColumn(const struct HdFacadeBand *band, u32 sampleCols,
+                                       u32 sampleRows)
+{
+    for (u32 x = band->spanStart; x <= band->spanEnd; x++)
+    {
+        const u32 sample = band->y * sampleCols + x;
+
+        // Tree canopy and hedge rows beside Fortree tree houses satisfy the
+        // wall contract but are vegetation, not a stepped tier of the
+        // structure they touch.
+        if (!HdMapSampleIsPropColumn(sample, sampleCols, sampleRows)
+         && !HdMapSampleIsFoliageArt(sample))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                                         const struct HdBuildingBounds *bounds)
 {
-    const u32 courseCols = sampleCols * 2;
+    u32 bandCount = 0;
+    bool8 attached;
 
     sHdBuildingCount = 0;
 
@@ -2994,13 +3118,7 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
             u32 spanEnd;
             u32 advanceX;
             u32 wallTop;
-            u32 wallStartCourse;
-            u32 wallEndCourse;
-            u32 spanStartCourse;
-            u32 spanEndCourse;
-            u32 supportCourse;
-            s16 roofHeight;
-            u16 building;
+            struct HdFacadeBand *band;
             bool8 hasEntrance = FALSE;
 
             if (!HdMapSampleIsSupportedWallCore(y * sampleCols + x, sampleCols, sampleRows))
@@ -3038,21 +3156,6 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                 && HdMapRowContinuesFacade(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows)
                 && !HdMapRowIsRoofOverhang(wallTop - 1, spanStart, spanEnd, sampleCols, sampleRows))
                 wallTop--;
-            // The north half of a multi-row facade's top row is the
-            // roof/facade contact-shadow course in the authored top-down
-            // tile, not vertical wall art. Starting at the south half keeps
-            // that shadow on the horizontal roof plane instead of turning it
-            // into detached black feet. A 1-row facade IS the storefront:
-            // door, sign, and window art fill the whole entrance metatile,
-            // so both of its courses stand as wall and the roof flood seeds
-            // from the solid cap row above instead.
-            wallStartCourse = wallTop == y ? wallTop * 2 : wallTop * 2 + 1;
-            wallEndCourse = y * 2 + 2;
-            spanStartCourse = spanStart * 2;
-            spanEndCourse = (spanEnd + 1) * 2;
-            supportCourse = ((y + 1) * 2) * courseCols + (coreStart + coreEnd + 1);
-            roofHeight = sHdCourseGroundHeights[supportCourse]
-                       + (wallEndCourse - wallStartCourse) * HD2D_COURSE_HEIGHT;
             // A facade sheet is owned by its actual entrance row. Scanning
             // every row above the door creates shifted, overlapping copies of
             // the same wall with identical height but different source bounds.
@@ -3063,50 +3166,51 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                 hasEntrance |= HdMapSampleIsDoorCourse(sample)
                             || sHdMapSamples[sample].hasWarpEntrance;
             }
-            if (sHdBuildingCount >= ARRAY_COUNT(sHdBuildings) || roofHeight > 127)
+            if (bandCount >= ARRAY_COUNT(sHdFacadeBands))
             {
                 x = advanceX;
                 continue;
             }
-            if (!hasEntrance)
-            {
-                x = advanceX;
-                continue;
-            }
-
-            building = sHdBuildingCount++;
-            sHdBuildings[building].parent = building;
-            sHdBuildings[building].componentId = 0;
-            sHdBuildings[building].facadeAnchorCourseY = wallStartCourse;
-            sHdBuildings[building].baseHeight = sHdCourseGroundHeights[supportCourse];
-            sHdBuildings[building].roofHeight = roofHeight;
-            sHdBuildings[building].hasEntrance = TRUE;
-            sHdBuildings[building].isClipped = spanStart == 0 || spanEnd + 1 == sampleCols;
-
-            for (u32 courseY = wallStartCourse; courseY < wallEndCourse; courseY++)
-            {
-                for (u32 courseX = spanStartCourse; courseX < spanEndCourse; courseX++)
-                {
-                    if (HdCourseIsRoofArt(courseX, courseY, sampleCols, sampleRows))
-                        continue;
-                    // Prop stacks standing inside a recessed span (courtyard
-                    // shelves, planters) support the row contract but are
-                    // plaza furniture, not wall sheet.
-                    if (HdMapSampleIsPropColumn(y * sampleCols + courseX / 2, sampleCols, sampleRows))
-                        continue;
-                    HdClaimBuildingCourse(courseX, courseY, courseCols, building, HD_BUILDING_WALL);
-                    if (HdCourseTouchesBuildingBoundary(courseX, courseY, courseCols, bounds))
-                        sHdBuildings[building].isClipped = TRUE;
-                }
-            }
-            if (wallStartCourse > 0)
-                HdFloodBuildingRoof(building, wallStartCourse - 1, spanStartCourse,
-                                    spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
-            HdFloodBuildingRoof(building, wallStartCourse, spanStartCourse,
-                                spanEndCourse, sampleCols, sampleRows, courseCols, bounds);
+            band = &sHdFacadeBands[bandCount++];
+            band->y = y;
+            band->spanStart = spanStart;
+            band->spanEnd = spanEnd;
+            band->coreStart = coreStart;
+            band->coreEnd = coreEnd;
+            band->wallTop = wallTop;
+            band->hasEntrance = hasEntrance;
+            band->claimed = FALSE;
             x = advanceX;
         }
     }
+
+    for (u32 index = 0; index < bandCount; index++)
+    {
+        if (sHdFacadeBands[index].hasEntrance)
+            HdClaimFacadeBand(&sHdFacadeBands[index], sampleCols, sampleRows, bounds);
+    }
+
+    // A doorless band standing beside an entrance-owning wall is a stepped
+    // tier of the same structure (gym wings around a protruding entrance
+    // pavilion). Claim it as its own building with its own height, borrowing
+    // the entrance; repeat so chained tiers attach through each other. Bands
+    // made only of prop columns stay plaza furniture.
+    do
+    {
+        attached = FALSE;
+        for (u32 index = 0; index < bandCount; index++)
+        {
+            struct HdFacadeBand *band = &sHdFacadeBands[index];
+
+            if (band->claimed || band->hasEntrance)
+                continue;
+            if (!HdBandHasAttachableColumn(band, sampleCols, sampleRows))
+                continue;
+            if (!HdBandTouchesClaimedWall(band, sampleCols, sampleRows))
+                continue;
+            attached |= HdClaimFacadeBand(band, sampleCols, sampleRows, bounds);
+        }
+    } while (attached);
 }
 
 static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
