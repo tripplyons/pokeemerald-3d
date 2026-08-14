@@ -18,6 +18,8 @@ const HD2D_RECEIVER_OFFSET_MASK = 31;
 const HD2D_RECEIVER_DX_SHIFT = HD2D_SURFACE_BITS;
 const HD2D_RECEIVER_DY_SHIFT = 8;
 const HD2D_FACADE_ROOF_OVERHANG = 0x80000000;
+const HD2D_FACADE_STEPPED_TIER = 0x40000000;
+const HD2D_FACADE_ROW_MASK = 0x3fff;
 
 const FULLSCREEN_VERTEX = /* wgsl */ `
 struct VertexOutput {
@@ -1245,16 +1247,23 @@ class WebGpuPresenter {
       }
     }
 
-    // A roofed component's slab stretches south over the depth of its wall
-    // source rows so the single authored roof spans from its authored back
-    // edge to the facade at the walkable front line — no repeated,
-    // synthesized, or displaced courses. The roof art scales mildly along
-    // its depth; back rows stay attached to whatever the map paints behind
-    // them.
+    // C marks adjacent facade bands that were attached as tiers of one
+    // authored shell. Their staggered roof rows encode top-down perspective,
+    // not independent deep footprints, so slide those slabs rigidly to their
+    // facades. Standalone buildings retain the continuous stretched shell.
+    const steppedComponents = new Set();
+    for (const component of components.values()) {
+      if (component.roofCells.some(([tx, ty]) =>
+          (facadeAt(tx, ty) & HD2D_FACADE_STEPPED_TIER) !== 0)
+          || component.wallCells.some(([tx, ty]) =>
+          (facadeAt(tx, ty) & HD2D_FACADE_STEPPED_TIER) !== 0))
+        steppedComponents.add(component.id);
+    }
     for (const component of components.values()) {
       component.frontShift = 0;
       component.roofNorthTy = 0;
       component.roofStretch = 1;
+      component.slideRoof = steppedComponents.has(component.id);
       if (!Number.isFinite(component.roofHeight)) continue;
       const groups = new Map();
       for (const [tx, ty] of component.wallCells) {
@@ -1283,11 +1292,52 @@ class WebGpuPresenter {
         southTy = Math.max(southTy, ty + 1);
       }
       component.roofNorthTy = northTy;
-      component.roofStretch = (southTy + component.frontShift - northTy)
-        / (southTy - northTy);
+      if (!component.slideRoof) {
+        component.roofStretch = (southTy + component.frontShift - northTy)
+          / (southTy - northTy);
+      }
     }
-    const roofMapTy = (component, ty) => component.roofNorthTy
-      + (ty - component.roofNorthTy) * component.roofStretch;
+    const roofMapTy = (component, ty) => component.slideRoof
+      ? ty + component.frontShift
+      : component.roofNorthTy + (ty - component.roofNorthTy) * component.roofStretch;
+    // Query transformed roof occupancy rather than the source grid when one
+    // tier closes against another. Otherwise a tall tier drops its generated
+    // side to the ground through the lower roof simply because their authored
+    // source rows were staggered to draw the original top-down perspective.
+    const physicalRoofColumns = new Map();
+    // Rear overhangs participate as covering tops so they can hide a tier seam,
+    // but their own closure remains suppressed below.
+    for (const component of components.values()) {
+      for (const [tx, ty] of component.roofCells) {
+        let intervals = physicalRoofColumns.get(tx);
+        if (!intervals) {
+          intervals = [];
+          physicalRoofColumns.set(tx, intervals);
+        }
+        intervals.push({
+          y0: roofMapTy(component, ty),
+          y1: roofMapTy(component, ty + 1),
+          height: heightAt(tx, ty),
+        });
+      }
+    }
+    const physicalRoofHeightAt = (tx, ty) => {
+      let height = -Infinity;
+      for (const interval of physicalRoofColumns.get(tx) || []) {
+        if (ty > interval.y0 && ty < interval.y1)
+          height = Math.max(height, interval.height);
+      }
+      return height;
+    };
+    const physicalReceiverHeightAt = (tx, ty) => {
+      const sourceY = Math.floor(ty);
+      const surface = surfaceAt(tx, sourceY);
+      // Building source cells have moved onto a facade/roof plane. They are
+      // not physical receivers at their old grid position; transformed roof
+      // occupancy above is authoritative for those cells.
+      return surface === HD2D_SURFACE_ROOF || surface === HD2D_SURFACE_WALL
+        ? -Infinity : heightAt(tx, sourceY);
+    };
 
     const visited = new Uint8Array(cols * rows);
     for (let ty = 0; ty < rows; ty++) {
@@ -1490,7 +1540,7 @@ class WebGpuPresenter {
         // browser-side connectivity cannot recover the physical wall plane.
         const word = facadeAt(tx, ty);
         const id = word & 0xffff;
-        const offset = word >>> 16;
+        const offset = (word >>> 16) & HD2D_FACADE_ROW_MASK;
         if (!id) continue;
         let group = groups.get(id);
         if (!group) {
@@ -1561,18 +1611,40 @@ class WebGpuPresenter {
           if (sameRoof(tx + dx, ty, component.id)) continue;
           if (inGrid(tx + dx, ty) && surfaceAt(tx + dx, ty) === HD2D_SURFACE_WALL
               && componentAt(tx + dx, ty) === component.id) continue;
-          const bottom = Math.max(component.base, heightAt(tx + dx, ty));
-          if (bottom >= height) continue;
+          const physicalY0 = roofMapTy(component, ty);
+          const physicalY1 = roofMapTy(component, ty + 1);
+          const cuts = [physicalY0, physicalY1];
+          for (const interval of physicalRoofColumns.get(tx + dx) || []) {
+            if (interval.y1 <= physicalY0 || interval.y0 >= physicalY1) continue;
+            cuts.push(Math.max(physicalY0, interval.y0),
+                      Math.min(physicalY1, interval.y1));
+          }
+          cuts.sort((a, b) => a - b);
           const x = worldX(dx < 0 ? tx : tx + 1);
-          closure([x, bottom, z0, 0, 0], [x, bottom, z1, 0, 0],
-                  [x, height, z1, 0, 0], [x, height, z0, 0, 0],
-                  [dx < 0 ? -1 : 1, 0, 0]);
+          for (let index = 0; index + 1 < cuts.length; index++) {
+            const segmentY0 = cuts[index];
+            const segmentY1 = cuts[index + 1];
+            if (segmentY1 - segmentY0 < 1e-6) continue;
+            const physicalMidY = (segmentY0 + segmentY1) / 2;
+            const bottom = Math.max(component.base,
+                                    physicalReceiverHeightAt(tx + dx, physicalMidY),
+                                    physicalRoofHeightAt(tx + dx, physicalMidY));
+            if (bottom >= height) continue;
+            const segmentZ0 = worldZ(segmentY0);
+            const segmentZ1 = worldZ(segmentY1);
+            closure([x, bottom, segmentZ0, 0, 0], [x, bottom, segmentZ1, 0, 0],
+                    [x, height, segmentZ1, 0, 0], [x, height, segmentZ0, 0, 0],
+                    [dx < 0 ? -1 : 1, 0, 0]);
+          }
         }
         for (const dy of [-1, 1]) {
           if (sameRoof(tx, ty + dy, component.id)) continue;
           if (inGrid(tx, ty + dy) && componentAt(tx, ty + dy) === component.id
               && surfaceAt(tx, ty + dy) === HD2D_SURFACE_WALL) continue;
-          const bottom = Math.max(component.base, heightAt(tx, ty + dy));
+          const edgeY = roofMapTy(component, dy < 0 ? ty : ty + 1);
+          const neighborY = edgeY + dy * 1e-3;
+          const bottom = Math.max(component.base, physicalReceiverHeightAt(tx, neighborY),
+                                  physicalRoofHeightAt(tx, neighborY));
           if (bottom >= height) continue;
           const z = dy < 0 ? z0 : z1;
           closure([worldX(tx), bottom, z, 0, 0], [worldX(tx + 1), bottom, z, 0, 0],

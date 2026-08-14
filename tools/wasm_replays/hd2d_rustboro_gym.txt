@@ -1,9 +1,0 @@
-# Rustboro Gym combines a tall, non-blocking rear cap with lower roofed
-# wings. The center transition and cap must publish as roof geometry so the
-# entrance stands at its walkable front edge instead of behind detached wings.
-120 warp 0 3 27 22
-320 screenshot rustboro-gym
-320 probe state
-321 probe hd2d-courses 18
-322 probe world-atlas
-323 probe height-map

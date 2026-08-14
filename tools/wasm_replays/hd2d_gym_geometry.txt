@@ -1,0 +1,24 @@
+# All eight exterior Gyms use stepped/tiered variants of the shared Gym
+# shell. Their adjacent roof tiers must stay compact instead of stretching
+# independently into deep towers. Rustboro also covers the non-blocking rear
+# cap classifier used by the common shell.
+120 warp 0 0 15 11
+320 screenshot petalburg-gym
+321 warp 0 2 8 8
+521 screenshot mauville-gym
+522 warp 0 3 27 22
+722 screenshot rustboro-gym
+722 probe state
+722 probe hd2d-courses 18
+722 probe world-atlas
+722 probe height-map
+723 warp 0 4 22 14
+923 screenshot fortree-gym
+924 warp 0 6 38 12
+1124 screenshot mossdeep-gym
+1125 warp 0 7 31 35
+1325 screenshot sootopolis-gym
+1326 warp 0 11 8 20
+1526 screenshot dewford-gym
+1527 warp 0 12 5 18
+1727 screenshot lavaridge-gym

@@ -49,6 +49,7 @@ extern void WasmApplyTilesetAnimations(const struct Tileset *tileset, u8 *dest, 
 #define HD2D_RECEIVER_DX_SHIFT HD2D_SURFACE_BITS
 #define HD2D_RECEIVER_DY_SHIFT 8
 #define HD2D_FACADE_ROOF_OVERHANG 0x80000000
+#define HD2D_FACADE_STEPPED_TIER  0x40000000
 #define HD2D_BUILDING_COUNT (HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS)
 #define HD2D_WORLD_OFFSET_X ((HD2D_WORLD_WIDTH - DISPLAY_WIDTH) / 2)
 #define HD2D_WORLD_OFFSET_Y ((HD2D_WORLD_HEIGHT - DISPLAY_HEIGHT) / 2)
@@ -1047,6 +1048,7 @@ struct HdBuildingCandidate
     s8 roofHeight;
     bool8 hasEntrance;
     bool8 isClipped;
+    bool8 isSteppedTier;
 };
 
 struct HdBuildingBounds
@@ -3014,7 +3016,8 @@ struct HdFacadeBand
 static struct HdFacadeBand sHdFacadeBands[HD2D_BUILDING_COUNT];
 
 static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
-                               u32 sampleRows, const struct HdBuildingBounds *bounds)
+                               u32 sampleRows, const struct HdBuildingBounds *bounds,
+                               bool8 isSteppedTier)
 {
     const u32 courseCols = sampleCols * 2;
     const u32 y = band->y;
@@ -3046,6 +3049,7 @@ static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
     sHdBuildings[building].roofHeight = roofHeight;
     sHdBuildings[building].hasEntrance = TRUE;
     sHdBuildings[building].isClipped = band->spanStart == 0 || band->spanEnd + 1 == sampleCols;
+    sHdBuildings[building].isSteppedTier = isSteppedTier;
 
     for (u32 courseY = wallStartCourse; courseY < wallEndCourse; courseY++)
     {
@@ -3083,6 +3087,7 @@ static bool8 HdBandTouchesClaimedWall(const struct HdFacadeBand *band, u32 sampl
 {
     const u32 courseCols = sampleCols * 2;
     const u32 courseRows = sampleRows * 2;
+    bool8 touches = FALSE;
     const u32 wallStartCourse = band->wallTop == band->y
         ? band->wallTop * 2 : band->wallTop * 2 + 1;
     const u32 x0 = band->spanStart * 2 > 0 ? band->spanStart * 2 - 1 : 0;
@@ -3099,10 +3104,16 @@ static bool8 HdBandTouchesClaimedWall(const struct HdFacadeBand *band, u32 sampl
 
             if (sHdCourseBuilding[course] >= 0
              && (sHdCourseBuildingKind[course] & HD_BUILDING_WALL))
-                return TRUE;
+            {
+                // The existing entrance band and this attached band are two
+                // authored tiers of the same shell; publish that relationship
+                // instead of asking the presenter to infer it from proximity.
+                sHdBuildings[sHdCourseBuilding[course]].isSteppedTier = TRUE;
+                touches = TRUE;
+            }
         }
     }
-    return FALSE;
+    return touches;
 }
 
 static bool8 HdBandHasAttachableColumn(const struct HdFacadeBand *band, u32 sampleCols,
@@ -3212,7 +3223,7 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
     for (u32 index = 0; index < bandCount; index++)
     {
         if (sHdFacadeBands[index].hasEntrance)
-            HdClaimFacadeBand(&sHdFacadeBands[index], sampleCols, sampleRows, bounds);
+            HdClaimFacadeBand(&sHdFacadeBands[index], sampleCols, sampleRows, bounds, FALSE);
     }
 
     // A doorless band standing beside an entrance-owning wall is a stepped
@@ -3233,7 +3244,7 @@ static void HdCollectBuildingCandidates(u32 sampleCols, u32 sampleRows,
                 continue;
             if (!HdBandTouchesClaimedWall(band, sampleCols, sampleRows))
                 continue;
-            attached |= HdClaimFacadeBand(band, sampleCols, sampleRows, bounds);
+            attached |= HdClaimFacadeBand(band, sampleCols, sampleRows, bounds, TRUE);
         }
     } while (attached);
 }
@@ -3253,6 +3264,7 @@ static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
         {
             sHdBuildings[root].hasEntrance |= sHdBuildings[building].hasEntrance;
             sHdBuildings[root].isClipped |= sHdBuildings[building].isClipped;
+            sHdBuildings[root].isSteppedTier |= sHdBuildings[building].isSteppedTier;
         }
     }
 
@@ -3305,6 +3317,8 @@ static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
                 sHdCourseFacadeData[course] = (rowOffset << 16) | (facade + 1);
             }
         }
+        if (sHdBuildings[root].isSteppedTier)
+            sHdCourseFacadeData[course] |= HD2D_FACADE_STEPPED_TIER;
     }
 }
 
