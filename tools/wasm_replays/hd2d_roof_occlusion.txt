@@ -1,0 +1,9 @@
+# Petalburg's rear Pokemon Center gable is an elevated roof over walkable
+# ground. The player must pass wholly behind it instead of piercing the roof.
+120 warp 0 0 20 12
+320 screenshot rear-gable-approach
+321 button down on
+325 screenshot rear-gable-entering
+329 button down off
+345 screenshot rear-gable-behind
+345 probe hd2d-courses 18

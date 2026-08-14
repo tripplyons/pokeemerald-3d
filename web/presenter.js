@@ -594,6 +594,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
 `;
 
 const TILE_SIZE = 8;
+const BILLBOARD_DEPTH_BIAS = 2;
 const CAMERA_HEIGHT = 480;
 const CAMERA_TILT_DEGREES = 45.384615;
 const CAMERA_NEAR = 32;
@@ -1883,20 +1884,19 @@ class WebGpuPresenter {
       };
       const extra = [layer, sourceW, sourceH, drawW, drawH, affine, pa, pb, pc, pd];
       const tail = [oamId, priority, projected.cameraDepth, screenX, screenY];
-      // Upright-plane depth: foot rows at ground depth, head rows nearer by
-      // their height, so structures occlude actors behind them while an actor
-      // in front of a wall keeps its head. The small camera-ward bias wins
-      // coplanar ties (standing at a facade line or on a structural deck).
-      const spriteDepth = (v) => {
-        const lift = anchorY - screenY - v;
-        return Math.min(0.9999, Math.max(0.0002,
-          (projected.cameraDepth - lift * cosine - 2 - CAMERA_NEAR) / (CAMERA_FAR - CAMERA_NEAR)));
-      };
+      // Sprite source height is screen-space art, not literal world height.
+      // Keep the whole camera-facing billboard at its gameplay footpoint
+      // depth so a projected roof occludes the actor after they pass behind
+      // it, rather than letting high source rows pierce through the roof. The
+      // small camera-ward bias preserves coplanar facade/deck ties in front.
+      const spriteDepth = Math.min(0.9999, Math.max(0.0002,
+        (projected.cameraDepth - BILLBOARD_DEPTH_BIAS - CAMERA_NEAR)
+        / (CAMERA_FAR - CAMERA_NEAR)));
       for (const point of [
         [x0,y0,0,0], [x1,y0,drawW,0], [x1,y1,drawW,drawH],
         [x0,y0,0,0], [x1,y1,drawW,drawH], [x0,y1,0,drawH],
       ]) vertex(normalVertices, point[0], point[1], point[2], point[3],
-                spriteDepth(point[3]), ...extra,
+                spriteDepth, ...extra,
                 ...maskPoint(point[0], point[1]), ...tail);
     }
 
