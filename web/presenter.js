@@ -1573,8 +1573,11 @@ class WebGpuPresenter {
           for (let px = x0; px < x1; px++) {
             const offset = (py * this.worldWidth + px) * 4;
             if (worldPixels[offset + 3] < 128) continue;
-            if (surfaceAt(tx, ty) === HD2D_SURFACE_WALL
-                && worldStructuralAlphaPixels[py * this.worldWidth + px] < 128) continue;
+            // Match the fragments that can actually survive on the generated
+            // structure. Roof courses often contain opaque floor or grass
+            // underlay beneath sparse cap art; sampling that discarded underlay
+            // paints generated side walls with the ground material.
+            if (worldStructuralAlphaPixels[py * this.worldWidth + px] < 128) continue;
             const red = worldPixels[offset];
             const green = worldPixels[offset + 1];
             const blue = worldPixels[offset + 2];
