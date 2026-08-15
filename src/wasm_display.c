@@ -1841,6 +1841,52 @@ static bool8 HdMapSampleIsSolidRoofSheet(u32 index, u32 sampleCols, u32 sampleRo
     return *cached == 2;
 }
 
+static bool8 HdMapSampleQualifiesAsEave(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    const u32 south = index / sampleCols + 1 < sampleRows ? index + sampleCols : index;
+
+    return sHdMapSamples[index].valid
+        && HdMapSampleIsStructuralMaterial(index)
+        && HdMapSampleHasTopArt(index)
+        && !HdMapSampleIsDoorCourse(index)
+        && !HdMapSampleIsFoliageArt(index)
+        && !HdMapSampleIsFloorSurface(index, sampleCols, sampleRows)
+        && !HdMapSampleIsPropColumn(index, sampleCols, sampleRows)
+        && (HdMapSampleSitsOnFacade(index, sampleCols, sampleRows)
+         || HdMapSampleIsDecorativeOverlay(south)
+         || HdMapSampleIsSolidRoofSheet(south, sampleCols, sampleRows)
+         || HdMapSampleIsBuildingMass(south, sampleCols, sampleRows));
+}
+
+static bool8 HdMapSampleReachesRoofSheet(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    // Multi-tile roof ornaments (the lab's swirl tank) and edge tiles whose
+    // top plane holds foreign overhang art (tree crowns on a west roof rim)
+    // separate an eave from its proving sheet by more than one tile. Walk
+    // along the row through tiles that themselves qualify as eave bodies
+    // until a solid sheet proves the run; a walk that meets anything else
+    // (grass, doors, foliage, prop stacks) dies there.
+    const u32 sampleX = index % sampleCols;
+
+    for (s32 direction = -1; direction <= 1; direction += 2)
+    {
+        for (u32 step = 1; step <= 3; step++)
+        {
+            const s32 x = (s32)sampleX + direction * (s32)step;
+            u32 neighbor;
+
+            if (x < 0 || x >= (s32)sampleCols)
+                break;
+            neighbor = (u32)((s32)index + direction * (s32)step);
+            if (HdMapSampleIsSolidRoofSheet(neighbor, sampleCols, sampleRows))
+                return TRUE;
+            if (!HdMapSampleQualifiesAsEave(neighbor, sampleCols, sampleRows))
+                break;
+        }
+    }
+    return FALSE;
+}
+
 static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
                                        u32 sampleRows)
 {
@@ -1902,16 +1948,15 @@ static bool8 HdCourseIsRoofArtUncached(u32 courseX, u32 courseY, u32 sampleCols,
     if (HdMapSampleIsSolidRoofSheet(sample, sampleCols, sampleRows))
         return TRUE;
     // Eaves keep top-plane edge art beside a solid roof sheet. They sit on
-    // the same facade or on another roof/eave row, not on open plaza.
+    // the same facade or on another roof/eave row, not on open plaza. The
+    // sheet may be a bounded walk away when an ornament or contaminated rim
+    // tile sits between them.
     if (HdMapSampleHasTopArt(sample)
      && (HdMapSampleSitsOnFacade(sample, sampleCols, sampleRows)
       || HdMapSampleIsDecorativeOverlay(south)
       || HdMapSampleIsSolidRoofSheet(south, sampleCols, sampleRows)
       || HdMapSampleIsBuildingMass(south, sampleCols, sampleRows))
-     && ((sampleX > 0
-       && HdMapSampleIsSolidRoofSheet(sample - 1, sampleCols, sampleRows))
-      || (sampleX + 1 < sampleCols
-       && HdMapSampleIsSolidRoofSheet(sample + 1, sampleCols, sampleRows))))
+     && HdMapSampleReachesRoofSheet(sample, sampleCols, sampleRows))
         return TRUE;
     // Same-width MART/PC window rows are NORMAL art on a COVERED facade.
     // COVERED cottage posts sit on another COVERED post and stay wall.
