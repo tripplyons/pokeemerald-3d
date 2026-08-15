@@ -1726,9 +1726,22 @@ class WebGpuPresenter {
             // physical roof occupancy already says where a lower adjoining
             // tier supports this side. A column-wide tier clamp would float
             // the closure above open ground in front of the lower tier.
-            const bottom = Math.max(component.base,
-                                    physicalReceiverHeightAt(tx + dx, physicalMidY),
-                                    physicalRoofHeightAt(tx + dx, physicalMidY));
+            let bottom = Math.max(component.base,
+                                  physicalReceiverHeightAt(tx + dx, physicalMidY),
+                                  physicalRoofHeightAt(tx + dx, physicalMidY));
+            // A tier running past an abutting tier's front or rear line
+            // would drop this side to the ground over the strip beyond that
+            // line, cutting a full-height blade beside the neighbor's facade
+            // (the Rustboro Gym bay corners). The segment's own edges say
+            // which roof just ended there: carry that roof line around the
+            // corner. Coverage at or above this tier's height is a
+            // same-height rear stagger step whose slab edge needs no
+            // curtain at all.
+            if (bottom <= component.base) {
+              const edge = Math.max(physicalRoofHeightAt(tx + dx, segmentY0 - 1e-3),
+                                    physicalRoofHeightAt(tx + dx, segmentY1 + 1e-3));
+              if (Number.isFinite(edge)) bottom = Math.max(bottom, Math.min(edge, height));
+            }
             if (bottom >= height) continue;
             const segmentZ0 = worldZ(segmentY0);
             const segmentZ1 = worldZ(segmentY1);
