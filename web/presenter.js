@@ -1047,8 +1047,15 @@ class WebGpuPresenter {
     const componentAt = (x, y) => geometryAt(x, y) >> HD2D_COMPONENT_SHIFT;
     const worldX = (x) => originX + x * TILE_SIZE - halfW;
     const worldZ = (y) => originY + y * TILE_SIZE - halfH;
-    const textureU = (x) => Math.max(0, Math.min(this.worldWidth, originX + x * TILE_SIZE)) / this.worldWidth;
-    const textureV = (y) => Math.max(0, Math.min(this.worldHeight, originY + y * TILE_SIZE)) / this.worldHeight;
+    // Texture anchors must stay identity with the unclamped worldX/worldZ
+    // positions. Clamping here dragged any rect that pokes past the atlas
+    // edge (every full-width border strip once originX goes negative) east
+    // by 8-gridOffsetX pixels and stretched its art, so border tree rows
+    // slid horizontally against in-map rows with the sub-course camera
+    // phase. Out-of-range coordinates are clamped by the sampler instead,
+    // and only affect the off-screen overscan margin.
+    const textureU = (x) => (originX + x * TILE_SIZE) / this.worldWidth;
+    const textureV = (y) => (originY + y * TILE_SIZE) / this.worldHeight;
     const pixelU = (pixel) => (Math.max(0, Math.min(this.worldWidth - 1, pixel)) + 0.5) / this.worldWidth;
     const pixelV = (pixel) => (Math.max(0, Math.min(this.worldHeight - 1, pixel)) + 0.5) / this.worldHeight;
     const MATERIAL_NEUTRAL_BUILDING = 8;
