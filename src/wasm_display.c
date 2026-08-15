@@ -2063,6 +2063,54 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
         return FALSE;
     if (probe % sampleCols + 1 < sampleCols && HdMapSampleIsDoorCourse(probe + 1))
         return FALSE;
+    // Wide facades put plain window bays two or more columns from the door
+    // (Littleroot houses, Birch's lab west wing), so the immediate flanks
+    // are not enough: the door proves the whole contiguous wall band along
+    // the base row. Only a foliage-free column of three or more courses
+    // consults the band — crate stacks and mart-side steps are one or two
+    // courses with open sky above and stay props, and any leaf course marks
+    // a planted palm or hedge, never a wall bay — while foliage or bare art
+    // also ends the walk, so a tree touching a house corner never bridges.
+    u32 runTop = probe;
+    u32 runHeight = 1;
+    bool8 runHasFoliage = HdMapSampleIsFoliageArt(probe);
+
+    while (runTop >= sampleCols
+        && sHdMapSamples[runTop - sampleCols].valid
+        && sHdMapSamples[runTop - sampleCols].collision)
+    {
+        runTop -= sampleCols;
+        runHeight++;
+        if (HdMapSampleIsFoliageArt(runTop))
+            runHasFoliage = TRUE;
+    }
+    if (runHeight >= 3 && !runHasFoliage)
+    {
+        for (s32 step = -1; step <= 1; step += 2)
+        {
+            u32 walk = probe;
+
+            while (step < 0 ? walk % sampleCols > 0
+                            : walk % sampleCols + 1 < sampleCols)
+            {
+                walk += step;
+                if (!sHdMapSamples[walk].valid
+                 || !sHdMapSamples[walk].collision
+                 || !HdMapSampleIsStructuralMaterial(walk)
+                 || !HdMapSampleHasVisibleArt(walk)
+                 || HdMapSampleIsFoliageArt(walk)
+                 || walk < sampleCols
+                 || !sHdMapSamples[walk - sampleCols].valid
+                 || !sHdMapSamples[walk - sampleCols].collision)
+                    break;
+                // Door or covered art only: warp entrances also mark cave
+                // mouths, whose neighboring rock columns are not wall bays.
+                if (HdMapSampleIsDoorCourse(walk)
+                 || HdMapSampleIsCoveredCourse(walk))
+                    return FALSE;
+            }
+        }
+    }
     while (probe >= sampleCols)
     {
         if (!sHdMapSamples[probe].valid)
