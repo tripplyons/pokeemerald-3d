@@ -1562,6 +1562,7 @@ class WebGpuPresenter {
     // by occupying many pixels in a door, logo, or sign tile.
     const recurringColorBuckets = (cells) => {
       const buckets = new Map();
+      let contributingCells = 0;
       for (let cellIndex = 0; cellIndex < cells.length; cellIndex++) {
         const [tx, ty] = cells[cellIndex];
         const seenInCell = new Set();
@@ -1597,8 +1598,13 @@ class WebGpuPresenter {
             bucket.blue += blue;
           }
         }
+        if (seenInCell.size) contributingCells++;
       }
-      const minimumCells = Math.max(1, Math.ceil(cells.length * 0.55));
+      // Transparent courses are holes in the authored shell, not votes against
+      // the colors visible in the remaining courses. Counting them in the
+      // denominator makes sparse facades fall back to generic gray/roof colors.
+      if (!contributingCells) return [];
+      const minimumCells = Math.max(1, Math.ceil(contributingCells * 0.55));
       return Array.from(buckets.values())
         .filter((bucket) => bucket.cells >= minimumCells)
         .map((bucket) => {
