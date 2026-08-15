@@ -604,6 +604,7 @@ const CAMERA_FAR = 1024;
 const VERTEX_FLOATS = 14;
 const BILLBOARD_VERTEX_FLOATS = 22;
 const CAST_SHADOW_VERTEX_FLOATS = 16;
+const BUILDING_MATERIAL_BYTES_PER_TILE = TILE_SIZE * TILE_SIZE * 5;
 const STRUCTURAL_SHADOW_SIZE = 1024;
 const LIGHT_MAP_SPAN = 1280;
 const LIGHT_DEPTH_SPAN = 1400;
@@ -683,11 +684,15 @@ class WebGpuPresenter {
     this.tileGeometry = new Uint16Array(terrainTileCapacity);
     this.tileReceivers = new Uint16Array(terrainTileCapacity);
     this.tileFacades = new Uint32Array(terrainTileCapacity);
+    this.tileBuildingMaterialPixels = new Uint8Array(
+      terrainTileCapacity * BUILDING_MATERIAL_BYTES_PER_TILE,
+    );
     this.terrainCols = 0;
     this.terrainRows = 0;
     this.terrainOriginX = 0;
     this.terrainOriginY = 0;
     this.terrainSignature = null;
+    this.terrainMaterialSnapshotValid = false;
     this.terrainVertexCount = 0;
     this.terrainRevision = 0;
     this.structuralShadowTerrainRevision = -1;
@@ -1021,9 +1026,57 @@ class WebGpuPresenter {
       }
     }
     signature >>>= 0;
-    // Exact sampled-value comparisons make hash collisions harmless. Reusing
-    // this mesh also preserves the matching component/facade bounds.
-    if (unchanged && signature === this.terrainSignature) return this.terrainVertexCount;
+    const syncBuildingMaterialSnapshot = (compareOnly) => {
+      const snapshot = this.tileBuildingMaterialPixels;
+      let matches = this.terrainMaterialSnapshotValid;
+      for (let ty = 0; ty < rows; ty++) {
+        for (let tx = 0; tx < cols; tx++) {
+          const tile = ty * cols + tx;
+          const surface = geometry[tile] & HD2D_SURFACE_MASK;
+          if (surface !== HD2D_SURFACE_WALL && surface !== HD2D_SURFACE_ROOF) continue;
+          const x0 = Math.max(0, Math.min(this.worldWidth - 1, originX + tx * TILE_SIZE));
+          const y0 = Math.max(0, Math.min(this.worldHeight - 1, originY + ty * TILE_SIZE));
+          const x1 = Math.min(this.worldWidth, x0 + TILE_SIZE);
+          const y1 = Math.min(this.worldHeight, y0 + TILE_SIZE);
+          const tileSnapshot = tile * BUILDING_MATERIAL_BYTES_PER_TILE;
+          for (let localY = 0; localY < TILE_SIZE; localY++) {
+            for (let localX = 0; localX < TILE_SIZE; localX++) {
+              const px = x0 + localX;
+              const py = y0 + localY;
+              const sourcePixel = py < y1 && px < x1 ? py * this.worldWidth + px : -1;
+              const sourceRgba = sourcePixel * 4;
+              const target = tileSnapshot + (localY * TILE_SIZE + localX) * 5;
+              const red = sourcePixel >= 0 ? worldPixels[sourceRgba] : 0;
+              const green = sourcePixel >= 0 ? worldPixels[sourceRgba + 1] : 0;
+              const blue = sourcePixel >= 0 ? worldPixels[sourceRgba + 2] : 0;
+              const alpha = sourcePixel >= 0 ? worldPixels[sourceRgba + 3] : 0;
+              const structuralAlpha = sourcePixel >= 0
+                ? worldStructuralAlphaPixels[sourcePixel] : 0;
+              if (compareOnly) {
+                if (snapshot[target] !== red || snapshot[target + 1] !== green
+                    || snapshot[target + 2] !== blue || snapshot[target + 3] !== alpha
+                    || snapshot[target + 4] !== structuralAlpha)
+                  matches = false;
+              } else {
+                snapshot[target] = red;
+                snapshot[target + 1] = green;
+                snapshot[target + 2] = blue;
+                snapshot[target + 3] = alpha;
+                snapshot[target + 4] = structuralAlpha;
+              }
+            }
+          }
+        }
+      }
+      if (!compareOnly) this.terrainMaterialSnapshotValid = true;
+      return matches;
+    };
+    const materialsUnchanged = unchanged && syncBuildingMaterialSnapshot(true);
+    // Exact sampled-value comparisons make hash collisions harmless. Building
+    // closure colors are also derived from atlas RGBA and structural-alpha
+    // pixels, so retain the mesh only when those source pixels still match.
+    if (unchanged && materialsUnchanged && signature === this.terrainSignature)
+      return this.terrainVertexCount;
 
     const vertices = [];
     const pushVertex = (x, y, z, u, v, normal, material, shell, base, neutralColor) =>
@@ -1832,6 +1885,7 @@ class WebGpuPresenter {
       this.vertexBuffer = this.device.createBuffer({ label: 'projected terrain mesh', size: this.vertexCapacity, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     }
     this.device.queue.writeBuffer(this.vertexBuffer, 0, data);
+    syncBuildingMaterialSnapshot(false);
     this.terrainSignature = signature;
     this.terrainVertexCount = data.length / VERTEX_FLOATS;
     this.terrainRevision++;
