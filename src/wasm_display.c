@@ -1938,6 +1938,28 @@ static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
         && HdMapSampleHasVisibleArt(index);
 }
 
+static bool8 HdMapSampleIsLoneFrontOrnament(u32 index, u32 sampleCols, u32 sampleRows)
+{
+    // A single colliding ornament (potted plant, mailbox) bolted onto the
+    // walkable row in front of a wall: no lateral collision ties it into a
+    // band, and its own south side is open plaza. The wall course above such
+    // an ornament keeps facade support. A lower story of a two-course wall
+    // never qualifies — its row is banded with the neighboring wall columns.
+    if (!sHdMapSamples[index].valid || !sHdMapSamples[index].collision)
+        return FALSE;
+    if (index % sampleCols > 0
+     && sHdMapSamples[index - 1].valid
+     && sHdMapSamples[index - 1].collision)
+        return FALSE;
+    if (index % sampleCols + 1 < sampleCols
+     && sHdMapSamples[index + 1].valid
+     && sHdMapSamples[index + 1].collision)
+        return FALSE;
+    return index + sampleCols < sampleCols * sampleRows
+        && sHdMapSamples[index + sampleCols].valid
+        && !sHdMapSamples[index + sampleCols].collision;
+}
+
 static bool8 HdMapSampleHasFacadeSupportUncached(u32 index, u32 sampleCols, u32 sampleRows)
 {
     if (index < sampleCols
@@ -1956,7 +1978,11 @@ static bool8 HdMapSampleHasFacadeSupportUncached(u32 index, u32 sampleCols, u32 
         return FALSE;
     return HdMapSampleIsOpaqueBlocked(index - sampleCols)
         && sHdMapSamples[index + sampleCols].valid
-        && !sHdMapSamples[index + sampleCols].collision
+        && (!sHdMapSamples[index + sampleCols].collision
+         // Birch's lab keeps a colliding potted plant directly in front of
+         // one wall column; without support there the column splits the
+         // facade band and the west half of the lab never claims.
+         || HdMapSampleIsLoneFrontOrnament(index + sampleCols, sampleCols, sampleRows))
         // Walkable mountain caps sit in front of cave warps and other
         // terrain mouths. That is not building-facade support.
         && sHdSampleBaseSurfaces[index + sampleCols] != HD_SURFACE_TERRAIN
@@ -2086,9 +2112,25 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
     }
     if (runHeight >= 3 && !runHasFoliage)
     {
+        u32 bandRow = probe;
+
+        // A lone colliding ornament (potted plant, mailbox) bolted onto the
+        // walkable row in front of a facade extends the run one row past the
+        // wall's real base, where the walk finds only open plaza. Run rows
+        // with no lateral collision are such bolt-ons: climb to the first
+        // row that joins a lateral band and walk there instead.
+        while (bandRow > runTop
+            && !(bandRow % sampleCols > 0
+              && sHdMapSamples[bandRow - 1].valid
+              && sHdMapSamples[bandRow - 1].collision)
+            && !(bandRow % sampleCols + 1 < sampleCols
+              && sHdMapSamples[bandRow + 1].valid
+              && sHdMapSamples[bandRow + 1].collision))
+            bandRow -= sampleCols;
+
         for (s32 step = -1; step <= 1; step += 2)
         {
-            u32 walk = probe;
+            u32 walk = bandRow;
 
             while (step < 0 ? walk % sampleCols > 0
                             : walk % sampleCols + 1 < sampleCols)
@@ -2105,9 +2147,11 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
                     break;
                 // Door or covered art only: warp entrances also mark cave
                 // mouths, whose neighboring rock columns are not wall bays.
+                // The proof covers the wall band and the courses above it;
+                // a bolt-on ornament below the walked row stays a prop.
                 if (HdMapSampleIsDoorCourse(walk)
                  || HdMapSampleIsCoveredCourse(walk))
-                    return FALSE;
+                    return index > bandRow;
             }
         }
     }
@@ -3325,7 +3369,16 @@ static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
             if (courseY < HdBandColumnWallStartCourse(band, courseX, wallStartCourse,
                                                       sampleCols, sampleRows, climb))
                 continue;
-            if (HdCourseIsRoofArt(courseX, courseY, sampleCols, sampleRows))
+            // A wall core standing over a lone front ornament reads as solid
+            // roof sheet (matched art planes over the ornament's facade
+            // body), but it is this band's own vertical wall; skipping it
+            // leaves an unclaimed column that splits the facade and starves
+            // the roof flood's support gate above (Birch's lab plant column).
+            // Genuine in-band roof art never sits on a supported wall core.
+            if (HdCourseIsRoofArt(courseX, courseY, sampleCols, sampleRows)
+             && !(courseY / 2 == y
+               && HdMapSampleIsSupportedWallCore(y * sampleCols + courseX / 2,
+                                                 sampleCols, sampleRows)))
                 continue;
             // Prop stacks standing inside a recessed span (courtyard
             // shelves, planters) support the row contract but are
