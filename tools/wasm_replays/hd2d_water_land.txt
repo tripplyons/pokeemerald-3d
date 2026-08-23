@@ -1,0 +1,10 @@
+# Water and ordinary land share one ground plane. The authored shoreline art
+# supplies the visible transition; HD-2D must not add a geometric lip.
+
+120 warp 0 5 18 32
+320 screenshot lilycove-shoreline
+320 probe height-map
+
+321 warp 0 34 27 70
+521 screenshot route119-riverbank
+521 probe height-map

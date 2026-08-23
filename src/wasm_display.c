@@ -2366,7 +2366,9 @@ static s8 HdSurfaceBaseHeight(u8 surface)
     switch (surface)
     {
     case HD_SURFACE_WATER:
-        return -4;
+        // Shoreline art already paints the transition between water and land.
+        // Keep both surfaces coplanar instead of adding a second geometric lip.
+        return 0;
     case HD_SURFACE_DECK:
     case HD_SURFACE_OPEN_DECK:
         return 4;
