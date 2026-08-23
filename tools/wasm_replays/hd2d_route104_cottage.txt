@@ -1,0 +1,10 @@
+# Route 104: the leafy Petalburg Woods passage is not a building, and
+# Mr. Briney's cottage keeps one continuous roof over its center door column.
+
+120 warp 0 19 21 47
+420 screenshot route104-cottage-and-woods
+420 probe hd2d-courses 32
+420 probe world-atlas
+420 probe height-map
+421 view classic
+431 screenshot route104-cottage-and-woods-classic

@@ -2011,6 +2011,10 @@ static bool8 HdMapSampleHasFacadeSupportUncached(u32 index, u32 sampleCols, u32 
      || index + sampleCols >= sampleCols * sampleRows
      || !sHdMapSamples[index].valid)
         return FALSE;
+    // Natural passages reuse door behavior so actors can walk under their
+    // canopy. Leaf-painted doors are vegetation, not building entrances.
+    if (HdMapSampleIsDoorCourse(index) && HdMapSampleIsFoliageArt(index))
+        return FALSE;
     // Cottage porches keep NORMAL collision art beside the door. COVERED
     // fences and plaza sheets are not facades unless they sit on a door.
     if (!(HdMapSampleIsDoorCourse(index)
@@ -2116,6 +2120,9 @@ static bool8 HdMapRowContinuesFacade(u32 row, u32 startX, u32 endX,
 static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
 {
     u32 probe = index;
+    u32 runTop;
+    u32 runHeight = 1;
+    bool8 runHasFoliage;
 
     // Prop stacks (market shelves, plant boxes, crates, tall trees) satisfy
     // facade support just like a wall-with-door column, but they are plain
@@ -2127,25 +2134,8 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
         && sHdMapSamples[probe + sampleCols].valid
         && sHdMapSamples[probe + sampleCols].collision)
         probe += sampleCols;
-    // A doorway's flanking wall bays (cottage window strips) carry no
-    // covered art in their own run; the door beside the run base proves the
-    // column is facade, not a free-standing prop stack.
-    if (probe % sampleCols > 0 && HdMapSampleIsDoorCourse(probe - 1))
-        return FALSE;
-    if (probe % sampleCols + 1 < sampleCols && HdMapSampleIsDoorCourse(probe + 1))
-        return FALSE;
-    // Wide facades put plain window bays two or more columns from the door
-    // (Littleroot houses, Birch's lab west wing), so the immediate flanks
-    // are not enough: the door proves the whole contiguous wall band along
-    // the base row. Only a foliage-free column of three or more courses
-    // consults the band — crate stacks and mart-side steps are one or two
-    // courses with open sky above and stay props, and any leaf course marks
-    // a planted palm or hedge, never a wall bay — while foliage or bare art
-    // also ends the walk, so a tree touching a house corner never bridges.
-    u32 runTop = probe;
-    u32 runHeight = 1;
-    bool8 runHasFoliage = HdMapSampleIsFoliageArt(probe);
-
+    runTop = probe;
+    runHasFoliage = HdMapSampleIsFoliageArt(probe);
     while (runTop >= sampleCols
         && sHdMapSamples[runTop - sampleCols].valid
         && sHdMapSamples[runTop - sampleCols].collision)
@@ -2155,6 +2145,30 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
         if (HdMapSampleIsFoliageArt(runTop))
             runHasFoliage = TRUE;
     }
+    // A doorway's flanking wall bays (cottage window strips) carry no
+    // covered art in their own run; the door beside the run base proves the
+    // column is facade, not a free-standing prop stack.
+    if (probe % sampleCols > 0 && HdMapSampleIsDoorCourse(probe - 1))
+        return FALSE;
+    if (probe % sampleCols + 1 < sampleCols && HdMapSampleIsDoorCourse(probe + 1))
+        return FALSE;
+    // A cottage's upper center roof courses can share a collision run that
+    // ends immediately above its non-colliding door. Let that door prove the
+    // courses above the run base, but never let a leafy passage do the same.
+    if (index < probe && !runHasFoliage
+     && probe + sampleCols < sampleCols * sampleRows
+     && sHdMapSamples[probe + sampleCols].valid
+     && (HdMapSampleIsDoorCourse(probe + sampleCols)
+      || sHdMapSamples[probe + sampleCols].hasWarpEntrance))
+        return FALSE;
+    // Wide facades put plain window bays two or more columns from the door
+    // (Littleroot houses, Birch's lab west wing), so the immediate flanks
+    // are not enough: the door proves the whole contiguous wall band along
+    // the base row. Only a foliage-free column of three or more courses
+    // consults the band — crate stacks and mart-side steps are one or two
+    // courses with open sky above and stay props, and any leaf course marks
+    // a planted palm or hedge, never a wall bay — while foliage or bare art
+    // also ends the walk, so a tree touching a house corner never bridges.
     if (runHeight >= 3 && !runHasFoliage)
     {
         u32 bandRow = probe;
