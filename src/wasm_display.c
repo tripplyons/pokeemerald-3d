@@ -2176,6 +2176,16 @@ static bool8 HdMapSampleIsOpaqueBlocked(u32 index)
         && HdMapSampleHasVisibleArt(index);
 }
 
+static bool8 HdMapSampleHasLateralCollision(u32 index, u32 sampleCols)
+{
+    return (index % sampleCols > 0
+         && sHdMapSamples[index - 1].valid
+         && sHdMapSamples[index - 1].collision)
+        || (index % sampleCols + 1 < sampleCols
+         && sHdMapSamples[index + 1].valid
+         && sHdMapSamples[index + 1].collision);
+}
+
 static bool8 HdMapSampleIsLoneFrontOrnament(u32 index, u32 sampleCols, u32 sampleRows)
 {
     // A single colliding ornament (potted plant, mailbox) bolted onto the
@@ -2183,15 +2193,9 @@ static bool8 HdMapSampleIsLoneFrontOrnament(u32 index, u32 sampleCols, u32 sampl
     // band, and its own south side is open plaza. The wall course above such
     // an ornament keeps facade support. A lower story of a two-course wall
     // never qualifies — its row is banded with the neighboring wall columns.
-    if (!sHdMapSamples[index].valid || !sHdMapSamples[index].collision)
-        return FALSE;
-    if (index % sampleCols > 0
-     && sHdMapSamples[index - 1].valid
-     && sHdMapSamples[index - 1].collision)
-        return FALSE;
-    if (index % sampleCols + 1 < sampleCols
-     && sHdMapSamples[index + 1].valid
-     && sHdMapSamples[index + 1].collision)
+    if (!sHdMapSamples[index].valid
+     || !sHdMapSamples[index].collision
+     || HdMapSampleHasLateralCollision(index, sampleCols))
         return FALSE;
     return index + sampleCols < sampleCols * sampleRows
         && sHdMapSamples[index + sampleCols].valid
@@ -2326,6 +2330,7 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
     u32 probe = index;
     u32 runTop;
     u32 runHeight = 1;
+    u32 bandRow;
     bool8 runHasFoliage;
 
     // Prop stacks (market shelves, plant boxes, crates, tall trees) satisfy
@@ -2349,6 +2354,13 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
         if (HdMapSampleIsFoliageArt(runTop))
             runHasFoliage = TRUE;
     }
+    // A lone colliding ornament (potted plant, mailbox, sign) bolted onto the
+    // walkable row in front of a facade extends the run one row past the
+    // wall's real base. Run rows with no lateral collision are such bolt-ons:
+    // climb to the first row that joins a lateral band.
+    bandRow = probe;
+    while (bandRow > runTop && !HdMapSampleHasLateralCollision(bandRow, sampleCols))
+        bandRow -= sampleCols;
     // A doorway's flanking wall bays (cottage window strips) carry no
     // covered art in their own run; the door beside the run base proves the
     // column is facade, not a free-standing prop stack.
@@ -2373,24 +2385,9 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
     // courses with open sky above and stay props, and any leaf course marks
     // a planted palm or hedge, never a wall bay — while foliage or bare art
     // also ends the walk, so a tree touching a house corner never bridges.
+    // The walk runs along the band row, not the bolt-on's open plaza row.
     if (runHeight >= 3 && !runHasFoliage)
     {
-        u32 bandRow = probe;
-
-        // A lone colliding ornament (potted plant, mailbox) bolted onto the
-        // walkable row in front of a facade extends the run one row past the
-        // wall's real base, where the walk finds only open plaza. Run rows
-        // with no lateral collision are such bolt-ons: climb to the first
-        // row that joins a lateral band and walk there instead.
-        while (bandRow > runTop
-            && !(bandRow % sampleCols > 0
-              && sHdMapSamples[bandRow - 1].valid
-              && sHdMapSamples[bandRow - 1].collision)
-            && !(bandRow % sampleCols + 1 < sampleCols
-              && sHdMapSamples[bandRow + 1].valid
-              && sHdMapSamples[bandRow + 1].collision))
-            bandRow -= sampleCols;
-
         for (s32 step = -1; step <= 1; step += 2)
         {
             u32 walk = bandRow;
@@ -2422,10 +2419,14 @@ static bool8 HdMapSampleIsPropColumn(u32 index, u32 sampleCols, u32 sampleRows)
     {
         if (!sHdMapSamples[probe].valid)
             return FALSE;
+        // Facade art proves the band row and the courses above it. A bolt-on
+        // below the band stays a prop (the sign in front of the Victory Road
+        // cliff), so it never stands as its own wall inside the face.
         if (HdMapSampleIsDoorCourse(probe)
          || HdMapSampleIsCoveredCourse(probe)
          || sHdMapSamples[probe].hasWarpEntrance)
-            return FALSE;
+            return probe <= bandRow && index > bandRow
+                && HdMapSampleHasLateralCollision(bandRow, sampleCols);
         if (!sHdMapSamples[probe - sampleCols].valid
          || !sHdMapSamples[probe - sampleCols].collision)
             return TRUE;
