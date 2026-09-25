@@ -1,0 +1,27 @@
+# HD-2D field frames whose hardware effects the billboard path cannot bake.
+# Semi-transparent weather sprites (ash, fog, sandstorm, clouds) and the Flash
+# circle's HBlank DMA windows go through the screen-effect composite, so each
+# state probe should report sceneKind 2 and the world should stay 3D.
+# Run with --save="pokeemerald (2).sav" for immediate warps.
+
+120 warp 24 12 16 20
+300 screenshot mt-chimney-ash
+301 probe state
+310 warp 0 28 40 8
+490 screenshot route113-ash
+500 warp 24 13 15 20
+680 screenshot jagged-pass-ash
+690 warp 24 22 10 10
+700 weather 6
+870 screenshot mt-pyre-fog
+871 probe state
+880 warp 24 8 10 10
+1060 screenshot granite-cave-flash
+1061 probe state
+1070 warp 0 26 20 60
+1080 weather 8
+1260 screenshot route111-sandstorm
+1261 probe state
+1270 warp 0 26 20 20
+1280 weather 1
+1460 screenshot route111-clouds

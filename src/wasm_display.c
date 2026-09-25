@@ -805,12 +805,14 @@ static u32 OamSpriteId(u32 index)
 
 // Engine sprites that follow the field camera belong to the projected world.
 // Transition art and other screen-space sprites leave the offset disabled or
-// write OAM directly.
+// write OAM directly. Semi-transparent sprites blend with whatever lies under
+// their screen pixels, so they stay in the composite as overlays.
 static bool8 OamIsWorldSprite(u32 index)
 {
     const u32 spriteId = OamSpriteId(index);
 
-    return spriteId < MAX_SPRITES && gSprites[spriteId].coordOffsetEnabled;
+    return spriteId < MAX_SPRITES && gSprites[spriteId].coordOffsetEnabled
+        && ((ReadU16(OAM + index * 8) >> 10) & 3) != ST_OAM_OBJ_BLEND;
 }
 
 static void RenderSprites(u16 dispcnt, s8 priority)
@@ -4436,22 +4438,23 @@ u32 WasmDisplaySceneKind(void)
         return 2;
     if (gMain.callback2 != CB2_Overworld)
         return 0;
+    // The same composite covers field frames whose hardware effects the
+    // billboard path cannot bake: the Flash circle's HBlank DMA windows,
+    // blends that select OBJ as target 1, and semi-transparent ash, fog,
+    // sandstorm, and cloud sprites.
     RefreshHblankDmaGpuRegs();
     for (u32 offset = 0; offset < REG_OFFSET_DMA0; offset += 2)
     {
         if (sHblankDmaGpuRegs[offset >> 1].active)
-            return 0;
+            return 2;
     }
-    // Hardware effects selecting OBJ as target 1 are not baked into the
-    // independent raw billboard sources. Keep alpha, brighten, and darken
-    // frames exact rather than presenting entities with the wrong treatment.
     if (((REG_BLDCNT >> 6) & 3) != 0 && (REG_BLDCNT & LAYER_OBJ))
-        return 0;
+        return 2;
     for (u32 i = 0; i < OAM_ENTRY_COUNT; i++)
     {
         const u16 attr0 = ReadU16(OAM + i * 8);
-        if (((attr0 >> 10) & 3) == 1)
-            return 0;
+        if (((attr0 >> 10) & 3) == ST_OAM_OBJ_BLEND)
+            return 2;
     }
     return 1;
 }
