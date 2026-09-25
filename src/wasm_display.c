@@ -148,8 +148,8 @@ static u8 sWasmWorldRgba[HD2D_WORLD_PIXELS * RGBA_CHANNELS];
 static u8 sWasmWorldStructuralAlpha[HD2D_WORLD_PIXELS];
 static u8 sWasmWorldLayerData[HD2D_WORLD_PIXELS];
 static u8 sWasmBgPriorityData[HD2D_WORLD_PIXELS];
-static s8 sWasmWorldHeightData[HD2D_WORLD_PIXELS];
-static s8 sWasmWorldGroundHeightData[HD2D_WORLD_PIXELS];
+static s16 sWasmWorldHeightData[HD2D_WORLD_PIXELS];
+static s16 sWasmWorldGroundHeightData[HD2D_WORLD_PIXELS];
 static u16 sWasmWorldGeometryData[HD2D_WORLD_PIXELS];
 static u16 sWasmWorldReceiverData[HD2D_WORLD_PIXELS];
 static u32 sWasmWorldFacadeData[HD2D_WORLD_PIXELS];
@@ -1162,8 +1162,8 @@ struct HdAdjacentSampleEvidence
 static struct HdMapSample sHdMapSamples[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
 static u16 sHdMapAttributes[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
 static u8 sHdSampleBaseSurfaces[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
-static s8 sHdCourseHeights[HD2D_COURSE_COUNT];
-static s8 sHdCourseGroundHeights[HD2D_COURSE_COUNT];
+static s16 sHdCourseHeights[HD2D_COURSE_COUNT];
+static s16 sHdCourseGroundHeights[HD2D_COURSE_COUNT];
 static u16 sHdCourseGeometry[HD2D_COURSE_COUNT];
 static u16 sHdCourseReceivers[HD2D_COURSE_COUNT];
 static s16 sHdCourseBuilding[HD2D_COURSE_COUNT];
@@ -1242,6 +1242,7 @@ struct HdBuildingCandidate
     bool8 isClipped;
     bool8 isSteppedTier;
     s16 tierCeiling;
+    s16 terraceTier;
 };
 
 struct HdBuildingBounds
@@ -2762,17 +2763,36 @@ static bool8 HdMapSampleIsCliffBandSurface(u32 index)
         && surface != HD_SURFACE_TERRAIN;
 }
 
-static bool8 HdMapSampleIsEarthArtUncached(u32 index)
+static bool8 HdColorIsEarth(const struct Rgb *color)
 {
-    const struct HdMapSample *sample = &sHdMapSamples[index];
+    u8 rg;
+    u8 gb;
+    u8 rb;
+    bool8 brown;
+    bool8 gray;
+
+    if (color->g > color->r + 12 && color->g > color->b + 12)
+        return FALSE;
+    rg = color->r > color->g ? color->r - color->g : color->g - color->r;
+    gb = color->g > color->b ? color->g - color->b : color->b - color->g;
+    rb = color->r > color->b ? color->r - color->b : color->b - color->r;
+    brown = color->r + 32 >= color->g
+         && color->r > color->b + 8
+         && color->g + 8 >= color->b
+         && color->r >= 32;
+    gray = rg < 28 && gb < 28 && rb < 28
+        && color->r >= 32 && color->r <= 188;
+    return brown || gray;
+}
+
+// Composite art lays the top plane over plane 0, as the native layers
+// stack. Plane 0 alone is the authored underlay of a cliff sheet.
+static bool8 HdMetatileIsEarthArt(const struct MapLayout *layout, u16 metatileId,
+                                  bool8 composite)
+{
     u32 earth = 0;
     u32 opaque = 0;
 
-    if (!sample->valid)
-        return FALSE;
-    // Authored cliff/opening sheets are rock, dirt, or stone paintings.
-    // Hedges, planters, and plaza tiles share collision and width with those
-    // sheets; only earth-colored plane-0 art should stand up.
     for (u32 quadrant = 0; quadrant < 4; quadrant++)
     {
         for (u32 y = 0; y < HD2D_TILE_WIDTH; y += 2)
@@ -2780,33 +2800,29 @@ static bool8 HdMapSampleIsEarthArtUncached(u32 index)
             for (u32 x = 0; x < HD2D_TILE_WIDTH; x += 2)
             {
                 struct Rgb color;
-                u8 rg;
-                u8 gb;
-                u8 rb;
-                bool8 brown;
-                bool8 gray;
 
-                if (!HdMetatilePixel(sample->layout, sample->metatileId, 0,
-                                     quadrant, x, y, &color))
+                if (!(composite && HdMetatilePixel(layout, metatileId, 1,
+                                                   quadrant, x, y, &color))
+                 && !HdMetatilePixel(layout, metatileId, 0, quadrant, x, y, &color))
                     continue;
                 opaque++;
-                if (color.g > color.r + 12 && color.g > color.b + 12)
-                    continue;
-                rg = color.r > color.g ? color.r - color.g : color.g - color.r;
-                gb = color.g > color.b ? color.g - color.b : color.b - color.g;
-                rb = color.r > color.b ? color.r - color.b : color.b - color.r;
-                brown = color.r + 32 >= color.g
-                     && color.r > color.b + 8
-                     && color.g + 8 >= color.b
-                     && color.r >= 32;
-                gray = rg < 28 && gb < 28 && rb < 28
-                    && color.r >= 32 && color.r <= 188;
-                if (brown || gray)
+                if (HdColorIsEarth(&color))
                     earth++;
             }
         }
     }
     return opaque != 0 && earth * 2 >= opaque;
+}
+
+static bool8 HdMapSampleIsEarthArtUncached(u32 index)
+{
+    const struct HdMapSample *sample = &sHdMapSamples[index];
+
+    // Authored cliff/opening sheets are rock, dirt, or stone paintings.
+    // Hedges, planters, and plaza tiles share collision and width with those
+    // sheets; only earth-colored plane-0 art should stand up.
+    return sample->valid
+        && HdMetatileIsEarthArt(sample->layout, sample->metatileId, FALSE);
 }
 
 static bool8 HdMapSampleIsEarthArt(u32 index)
@@ -3205,6 +3221,812 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                                        height, sampleY == bottom ? faceReceiver : 0);
             }
             x = end + 1;
+        }
+    }
+}
+
+#define HD2D_TERRACE_MARGIN 36
+#define HD2D_TERRACE_MAX_DIM 224
+#define HD2D_TERRACE_MAX_DEPTH 4
+#define HD2D_TERRACE_MIN_COLUMNS 3
+#define HD2D_TERRACE_MIN_WALKABLE 4
+#define HD2D_TERRACE_PAIR_SLOTS 8192
+#define HD2D_TERRACE_REF_STEP 2
+#define HD_TERRACE_NO_REGION 0xffff
+
+enum
+{
+    HD_TERRACE_INVALID,
+    HD_TERRACE_BAND,
+    HD_TERRACE_LEDGE,
+    HD_TERRACE_STAIRS,
+    HD_TERRACE_REGION,
+    HD_TERRACE_BLOCKED_REGION,
+};
+
+struct HdTerraceLayout
+{
+    const struct MapLayout *layout;
+    u8 walkable[NUM_METATILES_TOTAL / 8];
+    u8 earth[NUM_METATILES_TOTAL];
+};
+
+struct HdTerracePair
+{
+    u16 upper;
+    u16 lower;
+    u16 count;
+    u8 depth;
+    u16 counts[HD2D_TERRACE_MAX_DEPTH + 1];
+};
+
+#define HD2D_TERRACE_CELLS (HD2D_TERRACE_MAX_DIM * HD2D_TERRACE_MAX_DIM)
+
+static struct HdTerraceLayout sHdTerraceLayouts[8];
+static u8 sHdTerraceClass[HD2D_TERRACE_CELLS];
+static u16 sHdTerraceMetatile[HD2D_TERRACE_CELLS];
+static u16 sHdTerraceRegion[HD2D_TERRACE_CELLS];
+static s16 sHdTerraceTier[HD2D_TERRACE_CELLS];
+static s16 sHdTerraceTop[HD2D_TERRACE_CELLS];
+static bool8 sHdTerraceAssigned[HD2D_TERRACE_CELLS];
+static u32 sHdTerraceQueue[HD2D_TERRACE_CELLS];
+static u16 sHdTerraceRegionSize[HD2D_TERRACE_CELLS];
+static u16 sHdTerraceRegionWalkable[HD2D_TERRACE_CELLS];
+static bool8 sHdTerraceRegionLive[HD2D_TERRACE_CELLS];
+static u16 sHdTerraceParent[HD2D_TERRACE_CELLS];
+static s32 sHdTerraceOffset[HD2D_TERRACE_CELLS];
+static u16 sHdTerraceSetSize[HD2D_TERRACE_CELLS];
+static u16 sHdTerraceLargest[HD2D_TERRACE_CELLS];
+static s16 sHdTerraceRegionTier[HD2D_TERRACE_CELLS];
+static struct HdTerracePair sHdTerracePairs[HD2D_TERRACE_PAIR_SLOTS];
+static u16 sHdTerraceOrder[HD2D_TERRACE_PAIR_SLOTS];
+static const struct MapLayout *sHdTerraceKeyLayout;
+static u16 sHdTerraceKeyMap;
+static s32 sHdTerraceCols;
+static s32 sHdTerraceRows;
+static bool8 sHdTerraceValid;
+static s32 sHdTerraceRef;
+static bool8 sHdTerraceRefValid;
+static s16 sHdSampleTiers[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
+
+// Multi-height terrain. Native maps paint terraces as 2D cliff rows between
+// walkable areas; layout elevation bits stay constant across them (Mt Chimney
+// is elevation 3 throughout). Solve one height per walkable region over the
+// whole map plus its connections, so the published height stays continuous as
+// the camera window slides.
+static bool8 HdTerraceMapTypeEnabled(void)
+{
+    return gMapHeader.mapType != MAP_TYPE_INDOOR
+        && gMapHeader.mapType != MAP_TYPE_SECRET_BASE
+        && gMapHeader.mapType != MAP_TYPE_UNDERGROUND
+        && gMapHeader.mapType != MAP_TYPE_UNDERWATER;
+}
+
+static struct HdTerraceLayout *HdTerraceLayoutFor(const struct MapLayout *layout)
+{
+    for (u32 i = 0; i < ARRAY_COUNT(sHdTerraceLayouts); i++)
+    {
+        struct HdTerraceLayout *entry = &sHdTerraceLayouts[i];
+
+        if (entry->layout == layout)
+            return entry;
+        if (entry->layout != NULL)
+            continue;
+        entry->layout = layout;
+        memset(entry->walkable, 0, sizeof(entry->walkable));
+        memset(entry->earth, 0, sizeof(entry->earth));
+        // Floor art is judged over the whole layout. A walkable copy
+        // anywhere proves the metatile is ground, not a cliff painting.
+        for (s32 cell = 0; cell < layout->width * layout->height; cell++)
+        {
+            const u16 block = layout->map[cell];
+            const u16 metatileId = UNPACK_METATILE(block);
+
+            if (!UNPACK_COLLISION(block) && metatileId < NUM_METATILES_TOTAL)
+                entry->walkable[metatileId >> 3] |= 1 << (metatileId & 7);
+        }
+        return entry;
+    }
+    return NULL;
+}
+
+static bool8 HdTerraceIsBandSample(const struct HdMapSample *sample, u8 behavior)
+{
+    struct HdTerraceLayout *layout;
+    u16 metatileId = sample->metatileId;
+
+    if (!sample->collision)
+        return FALSE;
+    if (behavior == MB_CAVE)
+        return TRUE;
+    if (MetatileBehavior_IsSurfableWaterOrUnderwater(behavior)
+     || MetatileBehavior_IsBridgeOverWater(behavior)
+     || MetatileBehavior_IsDoor(behavior)
+     || MetatileBehavior_IsNonAnimDoor(behavior)
+     || sample->hasWarpEntrance
+     || metatileId >= NUM_METATILES_TOTAL)
+        return FALSE;
+    layout = HdTerraceLayoutFor(sample->layout);
+    if (layout == NULL || (layout->walkable[metatileId >> 3] & (1 << (metatileId & 7))))
+        return FALSE;
+    // Cliff rows often draw their face on the top plane (Mt Chimney), so
+    // judge the composited art rather than the plane-0 underlay.
+    if (layout->earth[metatileId] == 0)
+        layout->earth[metatileId] = HdMetatileIsEarthArt(sample->layout, metatileId, TRUE) + 1;
+    return layout->earth[metatileId] == 2;
+}
+
+static bool8 HdTerraceIsCliffRow(u32 cell)
+{
+    return sHdTerraceClass[cell] == HD_TERRACE_BAND
+        || sHdTerraceClass[cell] == HD_TERRACE_LEDGE;
+}
+
+static void HdTerraceClassify(void)
+{
+    const u32 cols = sHdTerraceCols;
+    const u32 rows = sHdTerraceRows;
+
+    memset(sHdTerraceLayouts, 0, sizeof(sHdTerraceLayouts));
+    for (u32 y = 0; y < rows; y++)
+    {
+        for (u32 x = 0; x < cols; x++)
+        {
+            const u32 cell = y * cols + x;
+            struct HdMapSample sample;
+            u8 behavior;
+
+            sHdTerraceMetatile[cell] = 0xffff;
+            if (!ResolveHdMapSample(x - HD2D_TERRACE_MARGIN + MAP_OFFSET,
+                                    y - HD2D_TERRACE_MARGIN + MAP_OFFSET, &sample))
+            {
+                sHdTerraceClass[cell] = HD_TERRACE_INVALID;
+                continue;
+            }
+            behavior = UNPACK_BEHAVIOR(HdMetatileAttributes(sample.layout, sample.metatileId));
+            sHdTerraceMetatile[cell] = sample.metatileId;
+            if (behavior >= MB_JUMP_EAST && behavior <= MB_JUMP_SOUTHWEST)
+                sHdTerraceClass[cell] = HD_TERRACE_LEDGE;
+            else if (HdTerraceIsBandSample(&sample, behavior))
+                sHdTerraceClass[cell] = HD_TERRACE_BAND;
+            else if (sample.collision)
+                sHdTerraceClass[cell] = HD_TERRACE_BLOCKED_REGION;
+            else
+                sHdTerraceClass[cell] = HD_TERRACE_REGION;
+        }
+    }
+    // Stairs cut a 1-2 cell walkable gap through a cliff row. Their art
+    // differs from the ground above or below; a path through a hedge keeps
+    // the same ground art and stays open, joining both sides. The row runs
+    // on past both sides; a gap between 1-wide rock pillars is a gully.
+    for (u32 y = 1; y + 1 < rows; y++)
+    {
+        for (u32 x = 2; x + 2 < cols; x++)
+        {
+            const u32 cell = y * cols + x;
+
+            for (u32 width = 1; width <= 2 && x + width + 1 < cols; width++)
+            {
+                bool8 stairs = HdTerraceIsCliffRow(cell - 2)
+                    && HdTerraceIsCliffRow(cell - 1)
+                    && HdTerraceIsCliffRow(cell + width)
+                    && HdTerraceIsCliffRow(cell + width + 1);
+
+                for (u32 i = 0; i < width && stairs; i++)
+                {
+                    const u32 gap = cell + i;
+
+                    if (sHdTerraceClass[gap] != HD_TERRACE_REGION
+                     || (sHdTerraceMetatile[gap] == sHdTerraceMetatile[gap - cols]
+                      && sHdTerraceMetatile[gap] == sHdTerraceMetatile[gap + cols]))
+                        stairs = FALSE;
+                }
+                if (!stairs)
+                    continue;
+                for (u32 i = 0; i < width; i++)
+                    sHdTerraceClass[cell + i] = HD_TERRACE_STAIRS;
+                break;
+            }
+        }
+    }
+}
+
+static bool8 HdTerraceIsRegion(u32 cell)
+{
+    return sHdTerraceClass[cell] == HD_TERRACE_REGION
+        || sHdTerraceClass[cell] == HD_TERRACE_BLOCKED_REGION;
+}
+
+static bool8 HdTerraceIsBand(u32 cell)
+{
+    return sHdTerraceClass[cell] == HD_TERRACE_BAND
+        || sHdTerraceClass[cell] == HD_TERRACE_LEDGE
+        || sHdTerraceClass[cell] == HD_TERRACE_STAIRS;
+}
+
+static bool8 HdTerraceIsPassable(u32 cell)
+{
+    return sHdTerraceClass[cell] == HD_TERRACE_REGION
+        || sHdTerraceClass[cell] == HD_TERRACE_LEDGE
+        || sHdTerraceClass[cell] == HD_TERRACE_STAIRS;
+}
+
+static void HdTerraceSeed(s32 localX, s32 localY, u32 *queueEnd)
+{
+    const u32 cell = (localY + HD2D_TERRACE_MARGIN) * sHdTerraceCols
+        + localX + HD2D_TERRACE_MARGIN;
+
+    if (localX < 0 || localY < 0
+     || localX >= gMapHeader.mapLayout->width || localY >= gMapHeader.mapLayout->height
+     || sHdTerraceAssigned[cell] || !HdTerraceIsPassable(cell))
+        return;
+    sHdTerraceAssigned[cell] = TRUE;
+    sHdTerraceQueue[(*queueEnd)++] = cell;
+}
+
+// Hedge-ringed flower beds and fenced gardens are walkable art the player
+// never enters. Their borders read as cliff rows, so only regions reached
+// from a warp, an object or the map edge may claim a terrace.
+static void HdTerraceMarkReachable(u32 regionCount)
+{
+    static const s8 offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    const struct MapLayout *layout = gMapHeader.mapLayout;
+    const struct MapEvents *events = gMapHeader.events;
+    const s32 cols = sHdTerraceCols;
+    const s32 rows = sHdTerraceRows;
+    u32 queueEnd = 0;
+
+    memset(sHdTerraceAssigned, 0, cols * rows);
+    memset(sHdTerraceRegionLive, 0, regionCount);
+    if (events != NULL)
+    {
+        for (u32 i = 0; i < events->objectEventCount; i++)
+            HdTerraceSeed(events->objectEvents[i].x, events->objectEvents[i].y, &queueEnd);
+        for (u32 i = 0; i < events->warpCount; i++)
+            HdTerraceSeed(events->warps[i].x, events->warps[i].y, &queueEnd);
+    }
+    for (s32 x = 0; x < layout->width; x++)
+    {
+        HdTerraceSeed(x, 0, &queueEnd);
+        HdTerraceSeed(x, layout->height - 1, &queueEnd);
+    }
+    for (s32 y = 0; y < layout->height; y++)
+    {
+        HdTerraceSeed(0, y, &queueEnd);
+        HdTerraceSeed(layout->width - 1, y, &queueEnd);
+    }
+    for (u32 queueStart = 0; queueStart < queueEnd; queueStart++)
+    {
+        const u32 cell = sHdTerraceQueue[queueStart];
+        const s32 x = cell % cols;
+        const s32 y = cell / cols;
+
+        if (sHdTerraceClass[cell] == HD_TERRACE_REGION)
+            sHdTerraceRegionLive[sHdTerraceRegion[cell]] = TRUE;
+        for (u32 d = 0; d < ARRAY_COUNT(offsets); d++)
+        {
+            const s32 nx = x + offsets[d][0];
+            const s32 ny = y + offsets[d][1];
+            u32 next;
+
+            if (nx < 0 || ny < 0 || nx >= cols || ny >= rows)
+                continue;
+            next = ny * cols + nx;
+            if (sHdTerraceAssigned[next] || !HdTerraceIsPassable(next))
+                continue;
+            sHdTerraceAssigned[next] = TRUE;
+            sHdTerraceQueue[queueEnd++] = next;
+        }
+    }
+}
+
+static u32 HdTerraceFloodRegions(void)
+{
+    static const s8 offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    const u32 cols = sHdTerraceCols;
+    const u32 cells = cols * sHdTerraceRows;
+    u32 regionCount = 0;
+
+    for (u32 i = 0; i < cells; i++)
+        sHdTerraceRegion[i] = HD_TERRACE_NO_REGION;
+    for (u32 start = 0; start < cells; start++)
+    {
+        u32 queueEnd = 0;
+
+        if (!HdTerraceIsRegion(start) || sHdTerraceRegion[start] != HD_TERRACE_NO_REGION)
+            continue;
+        sHdTerraceRegion[start] = regionCount;
+        sHdTerraceQueue[queueEnd++] = start;
+        sHdTerraceRegionSize[regionCount] = 0;
+        sHdTerraceRegionWalkable[regionCount] = 0;
+        for (u32 queueStart = 0; queueStart < queueEnd; queueStart++)
+        {
+            const u32 cell = sHdTerraceQueue[queueStart];
+            const s32 x = cell % cols;
+            const s32 y = cell / cols;
+
+            sHdTerraceRegionSize[regionCount]++;
+            if (sHdTerraceClass[cell] == HD_TERRACE_REGION)
+                sHdTerraceRegionWalkable[regionCount]++;
+            for (u32 d = 0; d < ARRAY_COUNT(offsets); d++)
+            {
+                const s32 nx = x + offsets[d][0];
+                const s32 ny = y + offsets[d][1];
+                u32 next;
+
+                if (nx < 0 || ny < 0 || nx >= (s32)cols || ny >= (s32)sHdTerraceRows)
+                    continue;
+                next = ny * cols + nx;
+                if (!HdTerraceIsRegion(next) || sHdTerraceRegion[next] != HD_TERRACE_NO_REGION)
+                    continue;
+                sHdTerraceRegion[next] = regionCount;
+                sHdTerraceQueue[queueEnd++] = next;
+            }
+        }
+        regionCount++;
+    }
+    return regionCount;
+}
+
+static void HdTerraceAddPair(u16 upper, u16 lower, u32 depth)
+{
+    u32 slot = ((u32)upper * 31 + (u32)lower * 7919) & (HD2D_TERRACE_PAIR_SLOTS - 1);
+
+    for (u32 probe = 0; probe < HD2D_TERRACE_PAIR_SLOTS; probe++)
+    {
+        struct HdTerracePair *pair = &sHdTerracePairs[slot];
+
+        if (pair->upper == HD_TERRACE_NO_REGION)
+        {
+            pair->upper = upper;
+            pair->lower = lower;
+        }
+        if (pair->upper == upper && pair->lower == lower)
+        {
+            pair->counts[depth]++;
+            return;
+        }
+        slot = (slot + 1) & (HD2D_TERRACE_PAIR_SLOTS - 1);
+    }
+}
+
+// A cliff row of depth d between an upper region U and a lower region L
+// reads as U standing 16d above L. Collect every vertical crossing; one
+// column is weak evidence, a face spanning several columns is strong.
+static u32 HdTerraceCollectPairs(void)
+{
+    const u32 cols = sHdTerraceCols;
+    const u32 rows = sHdTerraceRows;
+    u32 pairCount = 0;
+
+    for (u32 i = 0; i < HD2D_TERRACE_PAIR_SLOTS; i++)
+    {
+        sHdTerracePairs[i].upper = HD_TERRACE_NO_REGION;
+        memset(sHdTerracePairs[i].counts, 0, sizeof(sHdTerracePairs[i].counts));
+    }
+    for (u32 x = 0; x < cols; x++)
+    {
+        for (u32 y = 1; y < rows;)
+        {
+            u32 bottom = y;
+
+            if (!HdTerraceIsBand(y * cols + x))
+            {
+                y++;
+                continue;
+            }
+            while (bottom < rows && HdTerraceIsBand(bottom * cols + x))
+                bottom++;
+            if (bottom < rows && bottom - y <= HD2D_TERRACE_MAX_DEPTH
+             && HdTerraceIsRegion((y - 1) * cols + x)
+             && HdTerraceIsRegion(bottom * cols + x)
+             && sHdTerraceRegion[(y - 1) * cols + x] != sHdTerraceRegion[bottom * cols + x])
+                HdTerraceAddPair(sHdTerraceRegion[(y - 1) * cols + x],
+                                 sHdTerraceRegion[bottom * cols + x], bottom - y);
+            y = bottom;
+        }
+    }
+    for (u32 i = 0; i < HD2D_TERRACE_PAIR_SLOTS; i++)
+    {
+        struct HdTerracePair *pair = &sHdTerracePairs[i];
+        u16 best = 0;
+
+        if (pair->upper == HD_TERRACE_NO_REGION)
+            continue;
+        pair->depth = 1;
+        for (u32 depth = 1; depth <= HD2D_TERRACE_MAX_DEPTH; depth++)
+        {
+            if (pair->counts[depth] > best)
+            {
+                best = pair->counts[depth];
+                pair->depth = depth;
+            }
+        }
+        pair->count = best;
+        sHdTerraceOrder[pairCount++] = i;
+    }
+    return pairCount;
+}
+
+static bool8 HdTerracePairBefore(u16 left, u16 right)
+{
+    const struct HdTerracePair *a = &sHdTerracePairs[left];
+    const struct HdTerracePair *b = &sHdTerracePairs[right];
+
+    if (a->depth != b->depth)
+        return a->depth > b->depth;
+    return a->count > b->count;
+}
+
+static void HdTerraceSortPairs(u32 count)
+{
+    // Shell sort; the wasm runtime has no qsort.
+    for (u32 gap = count / 2; gap > 0; gap /= 2)
+    {
+        for (u32 i = gap; i < count; i++)
+        {
+            const u16 value = sHdTerraceOrder[i];
+            u32 j = i;
+
+            while (j >= gap && HdTerracePairBefore(value, sHdTerraceOrder[j - gap]))
+            {
+                sHdTerraceOrder[j] = sHdTerraceOrder[j - gap];
+                j -= gap;
+            }
+            sHdTerraceOrder[j] = value;
+        }
+    }
+}
+
+// Weighted union-find: offset[r] is tier(r) - tier(parent[r]).
+static u16 HdTerraceFind(u16 region, s32 *offset)
+{
+    s32 parentOffset;
+    u16 root;
+
+    if (sHdTerraceParent[region] == region)
+    {
+        *offset = 0;
+        return region;
+    }
+    root = HdTerraceFind(sHdTerraceParent[region], &parentOffset);
+    sHdTerraceOffset[region] += parentOffset;
+    sHdTerraceParent[region] = root;
+    *offset = sHdTerraceOffset[region];
+    return root;
+}
+
+static void HdTerraceSolveTiers(u32 regionCount, u32 pairCount)
+{
+    static const u16 minColumns[] = {HD2D_TERRACE_MIN_COLUMNS, 1};
+
+    for (u32 i = 0; i < regionCount; i++)
+    {
+        sHdTerraceParent[i] = i;
+        sHdTerraceOffset[i] = 0;
+        sHdTerraceSetSize[i] = 1;
+    }
+    // Deep, wide faces first. A mesa's thin back rim contradicts its front
+    // face and loses; faint one-column evidence only attaches leftovers.
+    for (u32 pass = 0; pass < ARRAY_COUNT(minColumns); pass++)
+    {
+        for (u32 i = 0; i < pairCount; i++)
+        {
+            const struct HdTerracePair *pair = &sHdTerracePairs[sHdTerraceOrder[i]];
+            const s32 delta = pair->depth * 16;
+            s32 upperOffset;
+            s32 lowerOffset;
+            u16 upperRoot;
+            u16 lowerRoot;
+
+            if (pair->count < minColumns[pass])
+                continue;
+            upperRoot = HdTerraceFind(pair->upper, &upperOffset);
+            lowerRoot = HdTerraceFind(pair->lower, &lowerOffset);
+            if (upperRoot == lowerRoot)
+                continue;
+            if (sHdTerraceSetSize[upperRoot] > sHdTerraceSetSize[lowerRoot])
+            {
+                sHdTerraceParent[lowerRoot] = upperRoot;
+                sHdTerraceOffset[lowerRoot] = upperOffset - delta - lowerOffset;
+                sHdTerraceSetSize[upperRoot] += sHdTerraceSetSize[lowerRoot];
+            }
+            else
+            {
+                sHdTerraceParent[upperRoot] = lowerRoot;
+                sHdTerraceOffset[upperRoot] = delta + lowerOffset - upperOffset;
+                sHdTerraceSetSize[lowerRoot] += sHdTerraceSetSize[upperRoot];
+            }
+        }
+    }
+    // Each connected set rests its largest region on tier 0.
+    for (u32 i = 0; i < regionCount; i++)
+        sHdTerraceLargest[i] = HD_TERRACE_NO_REGION;
+    for (u32 i = 0; i < regionCount; i++)
+    {
+        s32 offset;
+        const u16 root = HdTerraceFind(i, &offset);
+
+        if (sHdTerraceLargest[root] == HD_TERRACE_NO_REGION
+         || sHdTerraceRegionSize[i] > sHdTerraceRegionSize[sHdTerraceLargest[root]])
+            sHdTerraceLargest[root] = i;
+    }
+    for (u32 i = 0; i < regionCount; i++)
+    {
+        s32 offset;
+        s32 largestOffset;
+        const u16 root = HdTerraceFind(i, &offset);
+
+        HdTerraceFind(sHdTerraceLargest[root], &largestOffset);
+        sHdTerraceRegionTier[i] = offset - largestOffset;
+    }
+}
+
+static void HdTerraceAssignCells(void)
+{
+    static const s8 offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    const u32 cols = sHdTerraceCols;
+    const u32 rows = sHdTerraceRows;
+    const u32 cells = cols * rows;
+    u32 queueEnd = 0;
+
+    for (u32 cell = 0; cell < cells; cell++)
+    {
+        const s32 x = cell % cols;
+        const s32 y = cell / cols;
+        bool8 hit = FALSE;
+        s16 low = 0;
+        s16 high = 0;
+
+        sHdTerraceAssigned[cell] = FALSE;
+        if (HdTerraceIsRegion(cell))
+        {
+            sHdTerraceTier[cell] = sHdTerraceRegionTier[sHdTerraceRegion[cell]];
+            sHdTerraceTop[cell] = sHdTerraceTier[cell];
+            sHdTerraceAssigned[cell] = TRUE;
+            sHdTerraceQueue[queueEnd++] = cell;
+            continue;
+        }
+        if (!HdTerraceIsBand(cell))
+            continue;
+        // A cliff cell belongs to the terrace whose rim it paints: its top
+        // is the highest region reached across the row, and it rests on
+        // the lowest.
+        for (u32 d = 0; d < ARRAY_COUNT(offsets); d++)
+        {
+            for (s32 step = 1; step <= HD2D_TERRACE_MAX_DEPTH; step++)
+            {
+                const s32 nx = x + offsets[d][0] * step;
+                const s32 ny = y + offsets[d][1] * step;
+                u32 next;
+                s16 tier;
+
+                if (nx < 0 || ny < 0 || nx >= (s32)cols || ny >= (s32)rows)
+                    break;
+                next = ny * cols + nx;
+                if (HdTerraceIsBand(next))
+                    continue;
+                if (!HdTerraceIsRegion(next))
+                    break;
+                tier = sHdTerraceRegionTier[sHdTerraceRegion[next]];
+                if (!hit || tier < low)
+                    low = tier;
+                if (!hit || tier > high)
+                    high = tier;
+                hit = TRUE;
+                break;
+            }
+        }
+        if (!hit)
+            continue;
+        sHdTerraceTier[cell] = low;
+        sHdTerraceTop[cell] = high;
+        sHdTerraceAssigned[cell] = TRUE;
+        sHdTerraceQueue[queueEnd++] = cell;
+    }
+    // Rock interiors and map borders take the nearest resolved tier flat.
+    for (u32 queueStart = 0; queueStart < queueEnd; queueStart++)
+    {
+        const u32 cell = sHdTerraceQueue[queueStart];
+        const s32 x = cell % cols;
+        const s32 y = cell / cols;
+
+        for (u32 d = 0; d < ARRAY_COUNT(offsets); d++)
+        {
+            const s32 nx = x + offsets[d][0];
+            const s32 ny = y + offsets[d][1];
+            u32 next;
+
+            if (nx < 0 || ny < 0 || nx >= (s32)cols || ny >= (s32)rows)
+                continue;
+            next = ny * cols + nx;
+            if (sHdTerraceAssigned[next])
+                continue;
+            sHdTerraceAssigned[next] = TRUE;
+            sHdTerraceTier[next] = sHdTerraceTier[cell];
+            sHdTerraceTop[next] = sHdTerraceTier[cell];
+            sHdTerraceQueue[queueEnd++] = next;
+        }
+    }
+}
+
+static void HdTerraceSolve(void)
+{
+    const struct MapLayout *layout = gMapHeader.mapLayout;
+    const u16 mapKey = (gSaveBlock1Ptr->location.mapGroup << 8)
+        | gSaveBlock1Ptr->location.mapNum;
+    u32 regionCount;
+    u32 pairCount;
+
+    if (sHdTerraceKeyLayout == layout && sHdTerraceKeyMap == mapKey)
+        return;
+    sHdTerraceKeyLayout = layout;
+    sHdTerraceKeyMap = mapKey;
+    sHdTerraceRefValid = FALSE;
+    sHdTerraceCols = layout->width + HD2D_TERRACE_MARGIN * 2;
+    sHdTerraceRows = layout->height + HD2D_TERRACE_MARGIN * 2;
+    sHdTerraceValid = HdTerraceMapTypeEnabled()
+        && sHdTerraceCols <= HD2D_TERRACE_MAX_DIM
+        && sHdTerraceRows <= HD2D_TERRACE_MAX_DIM;
+    if (!sHdTerraceValid)
+        return;
+    HdTerraceClassify();
+    // A pocket too small to stand on between cliff rows is decoration on a
+    // slope (Route 112 below Mt Chimney), not a terrace. Fold it and every
+    // unreachable region into the rock so they cannot pin a separate tier.
+    regionCount = HdTerraceFloodRegions();
+    HdTerraceMarkReachable(regionCount);
+    for (u32 cell = 0; cell < (u32)(sHdTerraceCols * sHdTerraceRows); cell++)
+    {
+        if (!HdTerraceIsRegion(cell))
+            continue;
+        if (sHdTerraceRegionWalkable[sHdTerraceRegion[cell]] < HD2D_TERRACE_MIN_WALKABLE
+         || !sHdTerraceRegionLive[sHdTerraceRegion[cell]])
+            sHdTerraceClass[cell] = HD_TERRACE_BAND;
+    }
+    regionCount = HdTerraceFloodRegions();
+    pairCount = HdTerraceCollectPairs();
+    HdTerraceSortPairs(pairCount);
+    HdTerraceSolveTiers(regionCount, pairCount);
+    HdTerraceAssignCells();
+}
+
+static u32 HdTerraceCellAt(s32 mapX, s32 mapY)
+{
+    s32 x = mapX - MAP_OFFSET + HD2D_TERRACE_MARGIN;
+    s32 y = mapY - MAP_OFFSET + HD2D_TERRACE_MARGIN;
+
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= sHdTerraceCols) x = sHdTerraceCols - 1;
+    if (y >= sHdTerraceRows) y = sHdTerraceRows - 1;
+    return y * sHdTerraceCols + x;
+}
+
+static void HdTerraceUpdateRef(void)
+{
+    const s32 target = sHdTerraceTop[HdTerraceCellAt(gSaveBlock1Ptr->pos.x + MAP_OFFSET,
+                                                     gSaveBlock1Ptr->pos.y + MAP_OFFSET)];
+    const s32 diff = target - sHdTerraceRef;
+    s32 step = diff / 8;
+
+    // Keep the player's terrace at height 0 so the camera rig follows the
+    // climb. Ease the change over a few frames like a camera pan.
+    if (!sHdTerraceRefValid)
+    {
+        sHdTerraceRef = target;
+        sHdTerraceRefValid = TRUE;
+        return;
+    }
+    if (step > -HD2D_TERRACE_REF_STEP && step < HD2D_TERRACE_REF_STEP)
+        step = diff > HD2D_TERRACE_REF_STEP ? HD2D_TERRACE_REF_STEP
+             : diff < -HD2D_TERRACE_REF_STEP ? -HD2D_TERRACE_REF_STEP : diff;
+    sHdTerraceRef += step;
+}
+
+// Stairs climb the whole drop across their run: each course steps down
+// from the upper terrace so the lowest one sits a step above the ground.
+// The upper terrace is usually north, but a pass can climb southward. A gap
+// that dead-ends in rock, such as a cave door, keeps its cliff face.
+static bool8 HdPublishTerraceStairs(u32 sampleX, u32 sampleY, u32 sampleCols,
+                                    u32 courseCols, u32 cell, s32 height)
+{
+    const u32 cols = sHdTerraceCols;
+    const u32 sample = sampleY * sampleCols + sampleX;
+    u32 above = 0;
+    u32 below = 0;
+    u32 courses;
+    bool8 climbsNorth;
+
+    while (cell >= (above + 1) * cols
+        && sHdTerraceClass[cell - (above + 1) * cols] == HD_TERRACE_STAIRS)
+        above++;
+    while (cell + (below + 1) * cols < cols * sHdTerraceRows
+        && sHdTerraceClass[cell + (below + 1) * cols] == HD_TERRACE_STAIRS)
+        below++;
+    if (cell < (above + 1) * cols
+     || cell + (below + 1) * cols >= cols * sHdTerraceRows
+     || sHdTerraceClass[cell - (above + 1) * cols] != HD_TERRACE_REGION
+     || sHdTerraceClass[cell + (below + 1) * cols] != HD_TERRACE_REGION)
+        return FALSE;
+    climbsNorth = sHdTerraceTier[cell - (above + 1) * cols]
+               >= sHdTerraceTier[cell + (below + 1) * cols];
+    courses = (above + below + 1) * 2;
+    sHdSampleBaseSurfaces[sample] = HD_SURFACE_TERRAIN;
+    for (u32 row = 0; row < 2; row++)
+    {
+        const u32 step = climbsNorth ? above * 2 + row : below * 2 + 1 - row;
+        const s16 stepHeight = height * (s32)(courses - step) / (s32)courses;
+
+        for (u32 courseX = sampleX * 2; courseX < sampleX * 2 + 2; courseX++)
+        {
+            const u32 course = (sampleY * 2 + row) * courseCols + courseX;
+
+            sHdCourseGeometry[course] = HD_SURFACE_TERRAIN;
+            sHdCourseHeights[course] = stepHeight;
+            sHdCourseGroundHeights[course] = stepHeight;
+            sHdCourseReceivers[course] = 0;
+        }
+    }
+    return TRUE;
+}
+
+// Publish terrace tiers into the frame window. Step cells become terrain
+// caps at the upper terrace with their own art on the drop, before building
+// classification can read a mountain face as a stepped facade.
+static void HdApplyTerraces(s32 minMapX, s32 minMapY, u32 sampleCols, u32 sampleRows,
+                            u32 courseCols)
+{
+    HdTerraceSolve();
+    if (!sHdTerraceValid)
+    {
+        memset(sHdSampleTiers, 0, sampleCols * sampleRows * sizeof(sHdSampleTiers[0]));
+        return;
+    }
+    HdTerraceUpdateRef();
+    for (u32 sampleY = 0; sampleY < sampleRows; sampleY++)
+    {
+        for (u32 sampleX = 0; sampleX < sampleCols; sampleX++)
+        {
+            const u32 sample = sampleY * sampleCols + sampleX;
+            const u32 cell = HdTerraceCellAt(minMapX + sampleX, minMapY + sampleY);
+            const s32 top = sHdTerraceTop[cell];
+            const s32 tier = sHdTerraceTier[cell];
+            u32 faceCourses;
+            u32 bandRows = 1;
+            s32 drop;
+            s32 height;
+
+            sHdSampleTiers[sample] = tier - sHdTerraceRef;
+            if (top <= tier)
+                continue;
+            height = top - tier;
+            if (height > HD2D_CLIFF_BAND_MAX_HEIGHT)
+                height = HD2D_CLIFF_BAND_MAX_HEIGHT;
+            if (sHdTerraceClass[cell] == HD_TERRACE_STAIRS
+             && HdPublishTerraceStairs(sampleX, sampleY, sampleCols, courseCols, cell, height))
+                continue;
+            drop = top - sHdTerraceTop[HdTerraceCellAt(minMapX + sampleX,
+                                                       minMapY + sampleY + 1)];
+            faceCourses = 0;
+            if (drop > 0)
+            {
+                while (bandRows < HD2D_TERRACE_MAX_DEPTH
+                    && cell >= bandRows * sHdTerraceCols
+                    && HdTerraceIsBand(cell - bandRows * sHdTerraceCols)
+                    && sHdTerraceTop[cell - bandRows * sHdTerraceCols] == top)
+                    bandRows++;
+                faceCourses = bandRows * 2;
+                if (faceCourses > (u32)drop / HD2D_COURSE_HEIGHT)
+                    faceCourses = (u32)drop / HD2D_COURSE_HEIGHT;
+                if (faceCourses > HD2D_RECEIVER_OFFSET_MASK)
+                    faceCourses = HD2D_RECEIVER_OFFSET_MASK;
+            }
+            HdPublishCliffBandCell(sampleX, sampleY, sampleCols, courseCols, height,
+                                   faceCourses == 0 ? 0
+                                   : HD2D_RECEIVER_TERRAIN_FACE
+                                     | HD2D_RECEIVER_TERRAIN_FACE_SELF
+                                     | faceCourses);
         }
     }
 }
@@ -3710,6 +4532,8 @@ static bool8 HdClaimFacadeBand(struct HdFacadeBand *band, u32 sampleCols,
     sHdBuildings[building].isClipped = band->spanStart == 0 || band->spanEnd + 1 == sampleCols;
     sHdBuildings[building].isSteppedTier = isSteppedTier;
     sHdBuildings[building].tierCeiling = tierCeiling;
+    sHdBuildings[building].terraceTier = sHdSampleTiers[(y + 1) * sampleCols
+                                                        + (band->coreStart + band->coreEnd + 1) / 2];
 
     for (u32 courseY = minStartCourse; courseY < wallEndCourse; courseY++)
     {
@@ -3963,8 +4787,10 @@ static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
     for (u32 course = 0; course < courseRows * courseCols; course++)
     {
         const s16 owner = sHdCourseBuilding[course];
+        const u32 sample = (course / courseCols / 2) * (courseCols / 2) + course % courseCols / 2;
         u16 root;
         u8 surface;
+        s16 lift;
 
         if (owner < 0)
             continue;
@@ -3981,15 +4807,15 @@ static void HdPublishBuildingComponents(u32 courseCols, u32 courseRows)
             ? HD_SURFACE_WALL : HD_SURFACE_ROOF;
         sHdCourseGeometry[course] = (sHdBuildings[root].componentId << HD2D_COMPONENT_SHIFT)
                                   | surface;
-        sHdCourseGroundHeights[course] = sHdBuildings[root].baseHeight;
-        sHdCourseHeights[course] = surface == HD_SURFACE_ROOF
-            ? sHdBuildings[root].roofHeight : sHdBuildings[root].baseHeight;
+        // A building stands on the terrace in front of its entrance. Rear
+        // or side courses resting on cliff rows of another tier are lifted
+        // to it so the shell does not split along the terrace edge.
+        lift = sHdBuildings[root].terraceTier - sHdSampleTiers[sample];
+        sHdCourseGroundHeights[course] = sHdBuildings[root].baseHeight + lift;
+        sHdCourseHeights[course] = lift + (surface == HD_SURFACE_ROOF
+            ? sHdBuildings[root].roofHeight : sHdBuildings[root].baseHeight);
         if (surface == HD_SURFACE_ROOF)
         {
-            const u32 courseX = course % courseCols;
-            const u32 courseY = course / courseCols;
-            const u32 sample = (courseY / 2) * (courseCols / 2) + courseX / 2;
-
             // Decorative rear gables sit over non-blocking ground so actors
             // can walk behind the native top-down art. Publish that support
             // contract with the building metadata: their roof sheet remains
@@ -4361,6 +5187,7 @@ static void RenderHd2dWorld(u16 dispcnt)
         HdResolveOpenDeckReceivers(courseCols, courseRows);
         HdResolveTerrainFaceReceivers(courseCols, courseRows);
         HdRaiseBlockedCliffBands(sampleCols, sampleRows, courseCols);
+        HdApplyTerraces(minMapX, minMapY, sampleCols, sampleRows, courseCols);
         HdClassifyBuildingComponents(sampleCols, sampleRows,
                                      renderMinMapX - minMapX, renderMinMapY - minMapY,
                                      renderMaxMapX - minMapX + 1, renderMaxMapY - minMapY + 1);
@@ -4427,8 +5254,10 @@ static void RenderHd2dWorld(u16 dispcnt)
                 sWasmBgPriorityData[pixel] = bg3Priority;
             else
                 sWasmBgPriorityData[pixel] = 4;
-            sWasmWorldHeightData[pixel] = sHdCourseHeights[courseIndex];
-            sWasmWorldGroundHeightData[pixel] = sHdCourseGroundHeights[courseIndex];
+            sWasmWorldHeightData[pixel] = sHdCourseHeights[courseIndex]
+                + sHdSampleTiers[sampleIndex];
+            sWasmWorldGroundHeightData[pixel] = sHdCourseGroundHeights[courseIndex]
+                + sHdSampleTiers[sampleIndex];
             sWasmWorldGeometryData[pixel] = sHdCourseGeometry[courseIndex];
             sWasmWorldReceiverData[pixel] = sHdCourseReceivers[courseIndex];
             sWasmWorldFacadeData[pixel] = sHdCourseFacadeData[courseIndex];
@@ -4648,7 +5477,7 @@ u32 WasmWorldLayerBufferSize(void)
     return sizeof(sWasmWorldLayerData);
 }
 
-s8 *WasmWorldHeightBuffer(void)
+s16 *WasmWorldHeightBuffer(void)
 {
     return sWasmWorldHeightData;
 }
@@ -4658,7 +5487,7 @@ u32 WasmWorldHeightBufferSize(void)
     return sizeof(sWasmWorldHeightData);
 }
 
-s8 *WasmWorldGroundHeightBuffer(void)
+s16 *WasmWorldGroundHeightBuffer(void)
 {
     return sWasmWorldGroundHeightData;
 }
@@ -4696,6 +5525,20 @@ u32 *WasmWorldFacadeBuffer(void)
 u32 WasmWorldFacadeBufferSize(void)
 {
     return sizeof(sWasmWorldFacadeData);
+}
+
+// Automation probe: a map cell's terrace class, tier and top, packed as
+// class | (tier + 0x800) << 4 | (top + 0x800) << 16. Zero when unsolved.
+u32 WasmHdTerraceCellAt(s32 mapX, s32 mapY)
+{
+    u32 cell;
+
+    if (!sHdTerraceValid)
+        return 0;
+    cell = HdTerraceCellAt(mapX, mapY);
+    return sHdTerraceClass[cell]
+        | ((u32)(sHdTerraceTier[cell] + 0x800) & 0xfff) << 4
+        | ((u32)(sHdTerraceTop[cell] + 0x800) & 0xfff) << 16;
 }
 
 u8 *WasmDisplayLayerBuffer(void)

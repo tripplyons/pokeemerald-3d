@@ -627,6 +627,7 @@ const CAMERA_HEIGHT = 480;
 const CAMERA_TILT_DEGREES = 45.384615;
 const CAMERA_NEAR = 32;
 const CAMERA_FAR = 1024;
+const BILLBOARD_CLEARANCE_TILES = 8;
 const VERTEX_FLOATS = 14;
 const BILLBOARD_VERTEX_FLOATS = 22;
 const CAST_SHADOW_VERTEX_FLOATS = 16;
@@ -1060,8 +1061,8 @@ class WebGpuPresenter {
         geometry[tile] = geometryWord;
         receivers[tile] = receiverWord;
         facades[tile] = facadeWord;
-        signature = Math.imul(signature ^ (height & 0xff), 16777619);
-        signature = Math.imul(signature ^ (groundHeight & 0xff), 16777619);
+        signature = Math.imul(signature ^ (height & 0xffff), 16777619);
+        signature = Math.imul(signature ^ (groundHeight & 0xffff), 16777619);
         signature = Math.imul(signature ^ geometryWord, 16777619);
         signature = Math.imul(signature ^ receiverWord, 16777619);
         signature = Math.imul(signature ^ facadeWord, 16777619);
@@ -1517,6 +1518,13 @@ class WebGpuPresenter {
         ? -Infinity : heightAt(tx, sourceY);
     };
 
+    // A closure reaches the ground beside the building. That ground is lower
+    // than the base where the building stands at the edge of a terrace.
+    const closureFloor = (component, tx, ty) => {
+      const receiver = physicalReceiverHeightAt(tx, ty);
+      return Number.isFinite(receiver) ? receiver : component.base;
+    };
+
     const visited = new Uint8Array(cols * rows);
     for (let ty = 0; ty < rows; ty++) {
       for (let tx = 0; tx < cols; tx++) {
@@ -1837,8 +1845,7 @@ class WebGpuPresenter {
             // physical roof occupancy already says where a lower adjoining
             // tier supports this side. A column-wide tier clamp would float
             // the closure above open ground in front of the lower tier.
-            let bottom = Math.max(component.base,
-                                  physicalReceiverHeightAt(tx + dx, physicalMidY),
+            let bottom = Math.max(closureFloor(component, tx + dx, physicalMidY),
                                   physicalRoofHeightAt(tx + dx, physicalMidY));
             // A tier running past an abutting tier's front or rear line
             // would drop this side to the ground over the strip beyond that
@@ -1886,7 +1893,7 @@ class WebGpuPresenter {
           }
           const edgeY = roofMapTy(component, tx, dy < 0 ? ty : ty + 1);
           const neighborY = edgeY + dy * 1e-3;
-          const bottom = Math.max(component.base, physicalReceiverHeightAt(tx, neighborY),
+          const bottom = Math.max(closureFloor(component, tx, neighborY),
                                   physicalRoofHeightAt(tx, neighborY));
           if (bottom >= height) continue;
           const z = dy < 0 ? z0 : z1;
@@ -1959,6 +1966,32 @@ class WebGpuPresenter {
     const tileZ = Math.floor((atlasZ - this.terrainOriginY) / TILE_SIZE);
     if (tileX < 0 || tileZ < 0 || tileX >= this.terrainCols || tileZ >= this.terrainRows) return 0;
     return this.tileGroundHeights[tileZ * this.terrainCols + tileX];
+  }
+
+  // Camera depth that keeps a billboard in front of raised ground behind its
+  // footpoint. Only walkable heights count: a terrace or cliff cap is solid
+  // from the ground up, while a gate or roof span over an actor's path is not.
+  terrainClearanceDepth(left, right, groundZ, groundHeight, topY, sine, cosine, focal) {
+    const footTileZ = Math.floor((groundZ + this.worldHeight / 2 - this.terrainOriginY) / TILE_SIZE);
+    const tileX0 = Math.max(0, Math.floor((left + this.worldWidth / 2 - this.terrainOriginX) / TILE_SIZE));
+    const tileX1 = Math.min(this.terrainCols - 1,
+      Math.floor((right - 1 + this.worldWidth / 2 - this.terrainOriginX) / TILE_SIZE));
+    const rise = (this.height / 2 - topY) / focal;
+    let clearance = Infinity;
+    for (let tileZ = Math.min(footTileZ, this.terrainRows) - 1;
+         tileZ >= Math.max(0, footTileZ - BILLBOARD_CLEARANCE_TILES); tileZ--) {
+      const z = this.terrainOriginY + (tileZ + 1) * TILE_SIZE - this.worldHeight / 2;
+      // The highest point of this tile's south edge still behind the
+      // billboard's top row; anything higher is drawn above the actor.
+      const covered = (rise * (CAMERA_HEIGHT - z * sine) + z * cosine) / (sine + rise * cosine);
+      if (covered <= groundHeight) continue;
+      for (let tileX = tileX0; tileX <= tileX1; tileX++) {
+        const height = Math.min(covered, this.tileGroundHeights[tileZ * this.terrainCols + tileX]);
+        if (height > groundHeight)
+          clearance = Math.min(clearance, CAMERA_HEIGHT - height * cosine - z * sine);
+      }
+    }
+    return clearance;
   }
 
   cameraProjection(x, y, z, tilt, zoom) {
@@ -2206,8 +2239,13 @@ class WebGpuPresenter {
       // depth so a projected roof occludes the actor after they pass behind
       // it, rather than letting high source rows pierce through the roof. The
       // small camera-ward bias preserves coplanar facade/deck ties in front.
+      // Raised ground behind the footpoint (a terrace face behind an actor
+      // at its foot or mid-jump off a ledge) is still pulled in front of.
+      const clearance = this.terrainClearanceDepth(
+        screenX - this.width / 2, screenX + drawW - this.width / 2,
+        groundZ, groundHeight, y0, sine, cosine, focal);
       const spriteDepth = Math.min(0.9999, Math.max(0.0002,
-        (projected.cameraDepth - BILLBOARD_DEPTH_BIAS - CAMERA_NEAR)
+        (Math.min(projected.cameraDepth, clearance) - BILLBOARD_DEPTH_BIAS - CAMERA_NEAR)
         / (CAMERA_FAR - CAMERA_NEAR)));
       for (const point of [
         [x0,y0,0,0], [x1,y0,drawW,0], [x1,y1,drawW,drawH],

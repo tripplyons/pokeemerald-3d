@@ -896,15 +896,15 @@ function refreshFrameImage() {
     instance.exports.WasmWorldStructuralAlphaBuffer(),
     instance.exports.WasmWorldStructuralAlphaBufferSize(),
   );
-  worldHeightPixels = new Int8Array(
+  worldHeightPixels = new Int16Array(
     memory.buffer,
     instance.exports.WasmWorldHeightBuffer(),
-    instance.exports.WasmWorldHeightBufferSize(),
+    instance.exports.WasmWorldHeightBufferSize() / 2,
   );
-  worldGroundHeightPixels = new Int8Array(
+  worldGroundHeightPixels = new Int16Array(
     memory.buffer,
     instance.exports.WasmWorldGroundHeightBuffer(),
-    instance.exports.WasmWorldGroundHeightBufferSize(),
+    instance.exports.WasmWorldGroundHeightBufferSize() / 2,
   );
   worldGeometryPixels = new Uint16Array(
     memory.buffer,
@@ -1719,8 +1719,8 @@ function automationHd2dCourses(radius = 12) {
   if (!Number.isInteger(radius) || radius < 1 || radius > 32) throw new Error('invalid HD-2D course radius');
   const worldWidth = instance.exports.WasmWorldWidth();
   const worldHeight = instance.exports.WasmWorldHeight();
-  const heights = new Int8Array(memory.buffer, instance.exports.WasmWorldHeightBuffer(), instance.exports.WasmWorldHeightBufferSize());
-  const grounds = new Int8Array(memory.buffer, instance.exports.WasmWorldGroundHeightBuffer(), instance.exports.WasmWorldGroundHeightBufferSize());
+  const heights = new Int16Array(memory.buffer, instance.exports.WasmWorldHeightBuffer(), instance.exports.WasmWorldHeightBufferSize() / 2);
+  const grounds = new Int16Array(memory.buffer, instance.exports.WasmWorldGroundHeightBuffer(), instance.exports.WasmWorldGroundHeightBufferSize() / 2);
   const geometry = new Uint16Array(memory.buffer, instance.exports.WasmWorldGeometryBuffer(), instance.exports.WasmWorldGeometryBufferSize() / 2);
   const receivers = new Uint16Array(memory.buffer, instance.exports.WasmWorldReceiverBuffer(), instance.exports.WasmWorldReceiverBufferSize() / 2);
   const facades = new Uint32Array(memory.buffer, instance.exports.WasmWorldFacadeBuffer(), instance.exports.WasmWorldFacadeBufferSize() / 4);
@@ -1754,6 +1754,7 @@ function automationHd2dCourses(radius = 12) {
         geo: geometry[i],
         receiver: receivers[i],
         facade: facades[i],
+        terrace: instance.exports.WasmHdTerraceCellAt?.(mapX, mapY) ?? 0,
       });
     }
     rows.push(row);
@@ -1782,7 +1783,7 @@ function automationWorldAtlas() {
 function automationHeightMap() {
   const worldWidth = instance.exports.WasmWorldWidth();
   const worldHeight = instance.exports.WasmWorldHeight();
-  const heights = new Int8Array(memory.buffer, instance.exports.WasmWorldHeightBuffer(), worldWidth * worldHeight);
+  const heights = new Int16Array(memory.buffer, instance.exports.WasmWorldHeightBuffer(), worldWidth * worldHeight);
   const geometry = new Uint16Array(memory.buffer, instance.exports.WasmWorldGeometryBuffer(), worldWidth * worldHeight);
   const pixels = new Uint8ClampedArray(worldWidth * worldHeight * 4);
   for (let i = 0; i < worldWidth * worldHeight; i++) {
