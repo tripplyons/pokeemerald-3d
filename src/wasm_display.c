@@ -2226,6 +2226,16 @@ static bool8 HdMapSampleHasFacadeSupportUncached(u32 index, u32 sampleCols, u32 
          // one wall column; without support there the column splits the
          // facade band and the west half of the lab never claims.
          || HdMapSampleIsLoneFrontOrnament(index + sampleCols, sampleCols, sampleRows))
+        // A solid cap sheet over a door closes the door's own band; the
+        // door is the facade, not open ground in front of the cap.
+        // Supporting the cap splits off a second 1-row wall standing behind
+        // the door (Ever Grande's Victory Road mouth). Covered or overlaid
+        // rows above a door are upper wall art and keep their support.
+        && !((HdMapSampleIsDoorCourse(index + sampleCols)
+           || sHdMapSamples[index + sampleCols].hasWarpEntrance)
+          && sHdMapSamples[index].collision
+          && !HdMapSampleIsCoveredCourse(index)
+          && HdMapSamplePlanesMatch(index))
         // Walkable mountain caps sit in front of cave warps and other
         // terrain mouths. That is not building-facade support.
         && sHdSampleBaseSurfaces[index + sampleCols] != HD_SURFACE_TERRAIN
