@@ -1,0 +1,53 @@
+# Battle transitions keep the projected HD-2D world under their screen effects.
+# Each block warps to Route 101, starts one transition, and captures it after
+# the intro flashes. Covers HBlank callbacks (swirl, shuffle, ripple, slice,
+# white bars, mugshots, Frontier logo wave), mosaic (blur), windows (clockwise
+# wipe, big Poke Ball), and palette blends (grid squares). The big Poke Ball
+# runs last because it clears the VBlank callback, which stalls later warps
+# when no battle follows.
+120 warp 0 16 10 10
+300 screenshot route101
+320 battle-transition 1
+390 screenshot swirl
+390 probe state
+
+600 warp 0 16 10 10
+800 battle-transition 2
+870 screenshot shuffle
+
+1100 warp 0 16 10 10
+1300 battle-transition 6
+1380 screenshot ripple
+
+1600 warp 0 16 10 10
+1800 battle-transition 8
+1870 screenshot slice
+
+2100 warp 0 16 10 10
+2300 battle-transition 9
+2380 screenshot white-bars-fade
+
+2600 warp 0 16 10 10
+2800 battle-transition 12
+2890 screenshot mugshot
+
+3100 warp 0 16 10 10
+3300 battle-transition 30
+3390 screenshot frontier-logo-wave
+
+3600 warp 0 16 10 10
+3800 battle-transition 0
+3860 screenshot blur
+
+4100 warp 0 16 10 10
+4300 battle-transition 5
+4370 screenshot clockwise-wipe
+
+4600 warp 0 16 10 10
+4800 battle-transition 10
+4860 screenshot grid-squares
+
+5100 warp 0 16 10 10
+5300 battle-transition 3
+5380 screenshot big-pokeball
+5380 probe state

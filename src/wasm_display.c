@@ -108,6 +108,10 @@ typedef char HdSurfaceOpenDeckFitsPackedGeometry[
 #define DMA_START_MASK 0x3000
 #define DMA_ENABLE 0x8000
 #define GPU_REG_U16_COUNT (REG_OFFSET_DMA0 / 2)
+#define DISPLAY_REG_U16_COUNT ((REG_OFFSET_BLDY + 2) / 2)
+#define SCREEN_EFFECT_SOURCE_WORDS 4
+#define SCREEN_EFFECT_WEIGHT_ONE 256
+#define SCREEN_EFFECT_SOURCE_SNAP 0x01
 
 struct Rgb
 {
@@ -127,6 +131,14 @@ struct BgLayer
 {
     u8 bg;
     u8 type;
+};
+
+struct BlendOp
+{
+    u8 effect;
+    u8 eva;
+    u8 evb;
+    u8 evy;
 };
 
 static bool8 sWasmHd2dEnabled;
@@ -158,6 +170,19 @@ static u8 sObjectPriorities[128];
 static u8 sCurrentObjectId;
 static bool8 sRenderingObjectPass;
 static struct HblankDmaGpuReg sHblankDmaGpuRegs[GPU_REG_U16_COUNT];
+static u16 sScanlineGpuRegs[DISPLAY_HEIGHT][DISPLAY_REG_U16_COUNT];
+static u16 sFrameGpuRegs[DISPLAY_REG_U16_COUNT];
+static bool8 sScanlineGpuRegsValid;
+static bool8 sScreenEffectsSuppressed;
+static bool8 sRecordingScreenEffects;
+static bool8 sCurrentLayerIsWorld;
+static s16 sCurrentWorldSourceX;
+static s16 sCurrentWorldSourceY;
+static u8 sCurrentWorldSourceFlags;
+// A composite over the independently rendered world, per screen pixel:
+// final = add + weight / 256 * world(source). Classic overlays carry weight 0.
+static u8 sScreenEffectRgba[DISPLAY_PIXELS * RGBA_CHANNELS];
+static s16 sScreenEffectSources[DISPLAY_PIXELS * SCREEN_EFFECT_SOURCE_WORDS];
 
 static inline u8 *Ptr8(u32 address)
 {
@@ -261,6 +286,9 @@ static u16 ScanlineGpuReg(u32 offset, u8 y)
 {
     struct HblankDmaGpuReg *dma;
 
+    if (sScreenEffectsSuppressed)
+        return ReadU16(REG_BASE + offset);
+
     if (offset < REG_OFFSET_DMA0)
     {
         dma = &sHblankDmaGpuRegs[offset >> 1];
@@ -271,7 +299,42 @@ static u16 ScanlineGpuReg(u32 offset, u8 y)
         }
     }
 
+    if (sScanlineGpuRegsValid && offset < DISPLAY_REG_U16_COUNT * 2 && y < DISPLAY_HEIGHT)
+        return sScanlineGpuRegs[y][offset >> 1];
+
     return ReadU16(REG_BASE + offset);
+}
+
+// The frame is drawn after the game loop instead of during scanout, so the
+// runtime calls the HBlank callback once per visible line and records the
+// display registers each line starts with. Line 0 uses the VBlank state.
+void WasmBeginScanlineGpuRegs(void)
+{
+    for (u32 i = 0; i < DISPLAY_REG_U16_COUNT; i++)
+    {
+        sFrameGpuRegs[i] = ReadU16(REG_BASE + i * 2);
+        sScanlineGpuRegs[0][i] = sFrameGpuRegs[i];
+    }
+    sScanlineGpuRegsValid = TRUE;
+}
+
+void WasmCaptureScanlineGpuRegs(u32 line)
+{
+    if (line >= DISPLAY_HEIGHT)
+        return;
+    for (u32 i = 0; i < DISPLAY_REG_U16_COUNT; i++)
+        sScanlineGpuRegs[line][i] = ReadU16(REG_BASE + i * 2);
+}
+
+void WasmEndScanlineGpuRegs(void)
+{
+    for (u32 i = 0; i < DISPLAY_REG_U16_COUNT; i++)
+        *Ptr16(REG_BASE + i * 2) = sFrameGpuRegs[i];
+}
+
+void WasmClearScanlineGpuRegs(void)
+{
+    sScanlineGpuRegsValid = FALSE;
 }
 
 static u8 WindowMask(u8 x, u8 y)
@@ -279,65 +342,148 @@ static u8 WindowMask(u8 x, u8 y)
     const u16 dispcnt = REG_DISPCNT;
     const u16 windowsEnabled = dispcnt & 0xe000;
 
-    if (!windowsEnabled)
+    if (!windowsEnabled || sScreenEffectsSuppressed)
         return WINDOW_ALL_LAYERS;
 
     if ((dispcnt & 0x2000)
      && InWindowRange(x, ScanlineGpuReg(REG_OFFSET_WIN0H, y))
-     && InWindowRange(y, REG_WIN0V))
-        return REG_WININ & WINDOW_ALL_LAYERS;
+     && InWindowRange(y, ScanlineGpuReg(REG_OFFSET_WIN0V, y)))
+        return ScanlineGpuReg(REG_OFFSET_WININ, y) & WINDOW_ALL_LAYERS;
 
     if ((dispcnt & 0x4000)
      && InWindowRange(x, ScanlineGpuReg(REG_OFFSET_WIN1H, y))
-     && InWindowRange(y, REG_WIN1V))
-        return (REG_WININ >> 8) & WINDOW_ALL_LAYERS;
+     && InWindowRange(y, ScanlineGpuReg(REG_OFFSET_WIN1V, y)))
+        return (ScanlineGpuReg(REG_OFFSET_WININ, y) >> 8) & WINDOW_ALL_LAYERS;
 
-    return REG_WINOUT & WINDOW_ALL_LAYERS;
+    return ScanlineGpuReg(REG_OFFSET_WINOUT, y) & WINDOW_ALL_LAYERS;
 }
 
-static struct Rgb ActiveBlendColor(struct Rgb color, u8 layer, u32 pixel, bool8 effectsEnabled, u8 y, bool8 forceAlphaBlend)
+static inline u8 BlendCoefficient(u16 value)
 {
-    const u16 bldcnt = REG_BLDCNT;
+    return (value & 0x1f) > 16 ? 16 : value & 0x1f;
+}
+
+static struct BlendOp PixelBlendOp(u8 layer, u32 pixel, bool8 effectsEnabled, u8 y, bool8 forceAlphaBlend)
+{
+    const u16 bldcnt = sScreenEffectsSuppressed ? 0 : ScanlineGpuReg(REG_OFFSET_BLDCNT, y);
     const u8 effect = (bldcnt >> 6) & 3;
     const u8 sourceTargets = bldcnt & WINDOW_ALL_LAYERS;
     const bool8 isSourceTarget = (sourceTargets & layer) || (forceAlphaBlend && effect == 1);
-    u8 evy;
+    struct BlendOp op = {0};
 
     if ((!effectsEnabled && !(forceAlphaBlend && effect == 1)) || !isSourceTarget || effect == 0)
-        return color;
+        return op;
 
-    if (effect == 1 && ((bldcnt >> 8) & sLayerData[pixel]))
+    if (effect == 1)
     {
-        const u16 alpha = REG_BLDALPHA;
-        const u8 eva = (alpha & 0x1f) > 16 ? 16 : alpha & 0x1f;
-        const u8 evb = ((alpha >> 8) & 0x1f) > 16 ? 16 : (alpha >> 8) & 0x1f;
-        struct Rgb blended;
-        const u32 p = pixel * RGBA_CHANNELS;
-
-        blended.r = ClampBlend(((u32)color.r * eva + (u32)sWasmDisplayRgba[p] * evb) >> 4);
-        blended.g = ClampBlend(((u32)color.g * eva + (u32)sWasmDisplayRgba[p + 1] * evb) >> 4);
-        blended.b = ClampBlend(((u32)color.b * eva + (u32)sWasmDisplayRgba[p + 2] * evb) >> 4);
-        return blended;
+        if ((bldcnt >> 8) & sLayerData[pixel])
+        {
+            const u16 alpha = ScanlineGpuReg(REG_OFFSET_BLDALPHA, y);
+            op.effect = 1;
+            op.eva = BlendCoefficient(alpha);
+            op.evb = BlendCoefficient(alpha >> 8);
+        }
+        return op;
     }
 
-    evy = ScanlineGpuReg(REG_OFFSET_BLDY, y) & 0x1f;
-    if (evy > 16)
-        evy = 16;
+    op.effect = effect;
+    op.evy = BlendCoefficient(ScanlineGpuReg(REG_OFFSET_BLDY, y));
+    return op;
+}
 
-    if (effect == 2)
+static struct Rgb BlendColor(struct Rgb color, struct BlendOp op, u32 pixel)
+{
+    const u32 p = pixel * RGBA_CHANNELS;
+
+    if (op.effect == 1)
     {
-        color.r = color.r + (((255 - color.r) * evy) >> 4);
-        color.g = color.g + (((255 - color.g) * evy) >> 4);
-        color.b = color.b + (((255 - color.b) * evy) >> 4);
+        color.r = ClampBlend(((u32)color.r * op.eva + (u32)sWasmDisplayRgba[p] * op.evb) >> 4);
+        color.g = ClampBlend(((u32)color.g * op.eva + (u32)sWasmDisplayRgba[p + 1] * op.evb) >> 4);
+        color.b = ClampBlend(((u32)color.b * op.eva + (u32)sWasmDisplayRgba[p + 2] * op.evb) >> 4);
     }
-    else if (effect == 3)
+    else if (op.effect == 2)
     {
-        color.r = color.r - ((color.r * evy) >> 4);
-        color.g = color.g - ((color.g * evy) >> 4);
-        color.b = color.b - ((color.b * evy) >> 4);
+        color.r = color.r + (((255 - color.r) * op.evy) >> 4);
+        color.g = color.g + (((255 - color.g) * op.evy) >> 4);
+        color.b = color.b + (((255 - color.b) * op.evy) >> 4);
+    }
+    else if (op.effect == 3)
+    {
+        color.r = color.r - ((color.r * op.evy) >> 4);
+        color.g = color.g - ((color.g * op.evy) >> 4);
+        color.b = color.b - ((color.b * op.evy) >> 4);
     }
 
     return color;
+}
+
+// Mirror the hardware blend on the composite. World pixels contribute weight
+// only, so brighten, darken, and alpha reduce to a per-pixel affine function
+// of the projected world color.
+static void RecordScreenEffectPixel(s32 x, s32 y, u32 pixel, u8 layer, struct Rgb color, struct BlendOp op)
+{
+    u8 *add = &sScreenEffectRgba[pixel * RGBA_CHANNELS];
+    s16 *source = &sScreenEffectSources[pixel * SCREEN_EFFECT_SOURCE_WORDS];
+    const bool8 isWorld = (layer & (LAYER_BG1 | LAYER_BG2 | LAYER_BG3))
+                       || (layer == LAYER_OBJ && sCurrentLayerIsWorld);
+    u32 top[3];
+    s32 weight;
+    s16 sourceX = x;
+    s16 sourceY = y;
+    u8 flags = 0;
+
+    if (isWorld)
+    {
+        top[0] = top[1] = top[2] = 0;
+        weight = SCREEN_EFFECT_WEIGHT_ONE;
+        if (layer != LAYER_OBJ)
+        {
+            sourceX = sCurrentWorldSourceX;
+            sourceY = sCurrentWorldSourceY;
+            flags = sCurrentWorldSourceFlags;
+        }
+    }
+    else
+    {
+        top[0] = color.r;
+        top[1] = color.g;
+        top[2] = color.b;
+        weight = 0;
+    }
+
+    if (op.effect == 1)
+    {
+        for (u32 i = 0; i < 3; i++)
+            top[i] = ClampBlend((top[i] * op.eva + add[i] * op.evb) >> 4);
+        if (weight == 0)
+        {
+            sourceX = source[0];
+            sourceY = source[1];
+            flags = source[3];
+        }
+        weight = (weight * op.eva + source[2] * op.evb) >> 4;
+    }
+    else if (op.effect == 2)
+    {
+        for (u32 i = 0; i < 3; i++)
+            top[i] += ((255 - top[i]) * op.evy) >> 4;
+        weight = (weight * (16 - op.evy)) >> 4;
+    }
+    else if (op.effect == 3)
+    {
+        for (u32 i = 0; i < 3; i++)
+            top[i] -= (top[i] * op.evy) >> 4;
+        weight = (weight * (16 - op.evy)) >> 4;
+    }
+
+    add[0] = top[0];
+    add[1] = top[1];
+    add[2] = top[2];
+    add[3] = 255;
+    source[0] = sourceX;
+    source[1] = sourceY;
+    source[2] = weight;
+    source[3] = flags;
 }
 
 static void PutPixel(s32 x, s32 y, struct Rgb color, u8 layer, bool8 forceAlphaBlend)
@@ -354,20 +500,23 @@ static void PutPixel(s32 x, s32 y, struct Rgb color, u8 layer, bool8 forceAlphaB
         return;
 
     pixel = y * DISPLAY_WIDTH + x;
+    const u16 bldcnt = ScanlineGpuReg(REG_OFFSET_BLDCNT, y);
     const bool8 rawAlpha = sRenderingObjectPass && layer == LAYER_OBJ
-                        && (REG_BLDCNT & (3 << 6)) == BLDCNT_EFFECT_BLEND
-                        && (forceAlphaBlend || (REG_BLDCNT & BLDCNT_TGT1_OBJ));
+                        && (bldcnt & (3 << 6)) == BLDCNT_EFFECT_BLEND
+                        && (forceAlphaBlend || (bldcnt & BLDCNT_TGT1_OBJ));
     if (!rawAlpha)
-        color = ActiveBlendColor(color, layer, pixel, mask & LAYER_BACKDROP, y, forceAlphaBlend);
+    {
+        const struct BlendOp op = PixelBlendOp(layer, pixel, mask & LAYER_BACKDROP, y, forceAlphaBlend);
+        if (sRecordingScreenEffects)
+            RecordScreenEffectPixel(x, y, pixel, layer, color, op);
+        color = BlendColor(color, op, pixel);
+    }
     p = pixel * RGBA_CHANNELS;
     sWasmDisplayRgba[p] = color.r;
     sWasmDisplayRgba[p + 1] = color.g;
     sWasmDisplayRgba[p + 2] = color.b;
     if (rawAlpha)
-    {
-        const u8 eva = (REG_BLDALPHA & 0x1f) > 16 ? 16 : REG_BLDALPHA & 0x1f;
-        sWasmDisplayRgba[p + 3] = eva * 255 / 16;
-    }
+        sWasmDisplayRgba[p + 3] = BlendCoefficient(ScanlineGpuReg(REG_OFFSET_BLDALPHA, y)) * 255 / 16;
     else
         sWasmDisplayRgba[p + 3] = 255;
     sLayerData[pixel] = layer;
@@ -582,18 +731,45 @@ static bool8 ObjPixel(u16 tileBase, u8 x, u8 y, u8 width, bool8 color256, u8 pal
     return TRUE;
 }
 
+// Record where a composited world pixel samples the projected scene: its
+// scanline scroll relative to the frame's camera scroll, snapped to the
+// mosaic block it repeats.
+static void SetWorldSource(u8 bg, u8 x, u8 y, bool8 mosaic)
+{
+    const u32 hofsOffset = REG_OFFSET_BG0HOFS + bg * 4;
+    s32 dx = (ScanlineGpuReg(hofsOffset, y) - ReadU16(REG_BASE + hofsOffset)) & 511;
+    s32 dy = (ScanlineGpuReg(hofsOffset + 2, y) - ReadU16(REG_BASE + hofsOffset + 2)) & 511;
+
+    if (dx >= 256)
+        dx -= 512;
+    if (dy >= 256)
+        dy -= 512;
+    sCurrentWorldSourceX = x + dx;
+    sCurrentWorldSourceY = y + dy;
+    sCurrentWorldSourceFlags = mosaic ? SCREEN_EFFECT_SOURCE_SNAP : 0;
+}
+
 static void RenderBgLayer(u8 bg, u8 type)
 {
     struct Rgb color;
     const u8 layer = 1 << bg;
+    const bool8 mosaic = (ReadU16(REG_BASE + REG_OFFSET_BG0CNT + bg * 2) & BGCNT_MOSAIC) && !sScreenEffectsSuppressed;
+    const u8 blockWidth = mosaic ? (REG_MOSAIC & 15) + 1 : 1;
+    const u8 blockHeight = mosaic ? ((REG_MOSAIC >> 4) & 15) + 1 : 1;
 
     for (u32 y = 0; y < DISPLAY_HEIGHT; y++)
     {
+        const u8 sampleY = y - y % blockHeight;
+
         for (u32 x = 0; x < DISPLAY_WIDTH; x++)
         {
-            const bool8 hasPixel = type ? AffineBgPixel(bg, x, y, &color) : TextBgPixel(bg, x, y, &color);
-            if (hasPixel)
-                PutPixel(x, y, color, layer, FALSE);
+            const u8 sampleX = x - x % blockWidth;
+            const bool8 hasPixel = type ? AffineBgPixel(bg, sampleX, sampleY, &color) : TextBgPixel(bg, sampleX, sampleY, &color);
+            if (!hasPixel)
+                continue;
+            if (sRecordingScreenEffects)
+                SetWorldSource(bg, sampleX, sampleY, blockWidth > 1 || blockHeight > 1);
+            PutPixel(x, y, color, layer, FALSE);
         }
     }
 }
@@ -625,6 +801,16 @@ static s32 OamScreenY(u32 index, u16 attr0)
 static u32 OamSpriteId(u32 index)
 {
     return index < WasmOamCount() ? WasmOamSpriteId(index) : 0xff;
+}
+
+// Engine sprites that follow the field camera belong to the projected world.
+// Transition art and other screen-space sprites leave the offset disabled or
+// write OAM directly.
+static bool8 OamIsWorldSprite(u32 index)
+{
+    const u32 spriteId = OamSpriteId(index);
+
+    return spriteId < MAX_SPRITES && gSprites[spriteId].coordOffsetEnabled;
 }
 
 static void RenderSprites(u16 dispcnt, s8 priority)
@@ -668,6 +854,7 @@ static void RenderSprites(u16 dispcnt, s8 priority)
             continue;
 
         sCurrentObjectId = i;
+        sCurrentLayerIsWorld = sRecordingScreenEffects && OamIsWorldSprite(i);
         sObjectPriorities[i] = spritePriority;
         w = sizes[shape][(a1 >> 14) & 3][0];
         h = sizes[shape][(a1 >> 14) & 3][1];
@@ -742,7 +929,7 @@ static void PutObjectSourcePixel(u32 layer, u32 x, u32 y, struct Rgb color, bool
     sObjectSourceRgba[pixel + 3] = alpha;
 }
 
-static void RenderObjectSources(u16 dispcnt)
+static void RenderObjectSources(u16 dispcnt, bool8 worldOnly)
 {
     const bool8 mapping1d = dispcnt & 0x40;
     static const u8 sizes[3][4][2] = {
@@ -778,6 +965,8 @@ static void RenderObjectSources(u16 dispcnt)
         s32 oy;
 
         if ((!affine && (a0 & 0x0200)) || shape == 3 || objMode == 2)
+            continue;
+        if (worldOnly && !OamIsWorldSprite(i))
             continue;
         w = sizes[shape][(a1 >> 14) & 3][0];
         h = sizes[shape][(a1 >> 14) & 3][1];
@@ -4199,7 +4388,10 @@ void WasmRenderFrame(void)
         RenderSprites(dispcnt, -1);
 }
 
-void WasmRenderHd2dFrame(void)
+// With screenEffects set, the world is rendered without windows, blends,
+// mosaic, or scanline scrolling, and the final frame records how the
+// hardware applies them as a composite over the projected scene.
+void WasmRenderHd2dFrame(u32 screenEffects)
 {
     const u16 dispcnt = REG_DISPCNT;
     const u8 mode = dispcnt & 7;
@@ -4214,11 +4406,16 @@ void WasmRenderHd2dFrame(void)
     RenderHd2dWorld(dispcnt);
     // Keep the canonical viewport sourced from the live BG tilemaps so doors,
     // tile overrides, animations, windows, and scanline effects remain exact.
+    sScreenEffectsSuppressed = screenEffects;
     RenderTiled(dispcnt, FALSE, FALSE);
     CopyCanonicalWorld();
-    RenderObjectSources(dispcnt);
+    sScreenEffectsSuppressed = FALSE;
+    RenderObjectSources(dispcnt, screenEffects);
     RenderObjectPass(dispcnt);
+    sRecordingScreenEffects = screenEffects;
     RenderTiled(dispcnt, TRUE, TRUE);
+    sRecordingScreenEffects = FALSE;
+    sCurrentLayerIsWorld = FALSE;
 }
 
 u32 WasmDisplaySceneKind(void)
@@ -4227,14 +4424,17 @@ u32 WasmDisplaySceneKind(void)
 
     if (mode != 0)
         return 0;
-    // Basic-overworld callbacks are used by field transitions whose
-    // screen-space effects cannot be projected faithfully.
-    if (gMain.callback2 != CB2_Overworld)
-        return 0;
     if (gMapHeader.mapType == MAP_TYPE_NONE)
         return 0;
     if (gMapHeader.mapType == MAP_TYPE_INDOOR
      || gMapHeader.mapType == MAP_TYPE_SECRET_BASE)
+        return 0;
+    // Field battle transitions run the basic overworld callback under
+    // screen-space windows, scanline scrolling, mosaic, and blends. Those are
+    // composited over the projected world.
+    if (gMain.callback2 == CB2_OverworldBasic)
+        return 2;
+    if (gMain.callback2 != CB2_Overworld)
         return 0;
     RefreshHblankDmaGpuRegs();
     for (u32 offset = 0; offset < REG_OFFSET_DMA0; offset += 2)
@@ -4527,6 +4727,26 @@ u32 WasmHdDebugSamplePredicates(s32 mapX, s32 mapY)
     if (HdCourseIsRoofArt((u32)sampleX * 2 + 1, (u32)sampleY * 2 + 1, cols, rows)) bits |= 1u << 25;
     if (sHdMapSamples[index].hasWarpEntrance) bits |= 1u << 26;
     return bits;
+}
+
+u8 *WasmDisplayScreenEffectBuffer(void)
+{
+    return sScreenEffectRgba;
+}
+
+u32 WasmDisplayScreenEffectBufferSize(void)
+{
+    return sizeof(sScreenEffectRgba);
+}
+
+s16 *WasmDisplayScreenEffectSourceBuffer(void)
+{
+    return sScreenEffectSources;
+}
+
+u32 WasmDisplayScreenEffectSourceBufferSize(void)
+{
+    return sizeof(sScreenEffectSources);
 }
 
 u8 *WasmDisplayBuffer(void)

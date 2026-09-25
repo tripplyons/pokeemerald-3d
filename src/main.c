@@ -152,6 +152,35 @@ void WasmDmaStop0(void)
 {
     DmaStop(0);
 }
+
+void WasmBeginScanlineGpuRegs(void);
+void WasmCaptureScanlineGpuRegs(u32 line);
+void WasmEndScanlineGpuRegs(void);
+void WasmClearScanlineGpuRegs(void);
+
+// The browser draws the whole frame after VBlank, so run the HBlank callback
+// for each visible line up front and let the renderer read the registers each
+// line starts with. The live registers keep their VBlank state afterward.
+static void RunHBlankLines(void)
+{
+    if (!REG_IME
+     || !(REG_IE & INTR_FLAG_HBLANK)
+     || !(REG_DISPSTAT & DISPSTAT_HBLANK_INTR)
+     || gMain.hblankCallback == NULL)
+    {
+        WasmClearScanlineGpuRegs();
+        return;
+    }
+
+    WasmBeginScanlineGpuRegs();
+    for (u32 line = 0; line < DISPLAY_HEIGHT; line++)
+    {
+        REG_VCOUNT = line;
+        HBlankIntr();
+        WasmCaptureScanlineGpuRegs(line + 1);
+    }
+    WasmEndScanlineGpuRegs();
+}
 #endif
 
 void WasmRunFrame(void)
@@ -192,6 +221,7 @@ void WasmRunFrame(void)
     MapMusicMain();
 #if WASM
     VBlankIntr();
+    RunHBlankLines();
 #else
     WaitForVBlank();
 #endif

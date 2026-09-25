@@ -56,6 +56,7 @@ const SAVE_BLOCK2_ENCRYPTION_KEY_OFFSET = 0x0ac;
 const SAVE_BLOCK2_TRAINER_ID_OFFSET = 0x00a;
 const SAVE_BLOCK1_COINS_OFFSET = 0x494;
 const RUNNING_SHOES_FLAG = 0x8c0;
+const BATTLE_TRANSITION_COUNT = 42;
 const SAVE_BAG_POCKETS = [
   [0x560, 30, 99],
   [0x5d8, 30, 99],
@@ -154,6 +155,8 @@ let objectSourcePixels;
 let objectDescriptors;
 let objectPixels;
 let objectPriorities;
+let screenEffectPixels;
+let screenEffectSources;
 let lastSceneKind = 0;
 const pressed = new Set();
 const pendingPresses = new Map();
@@ -953,6 +956,16 @@ function refreshFrameImage() {
     instance.exports.WasmDisplayObjectPriorities(),
     instance.exports.WasmDisplayObjectPrioritiesSize(),
   );
+  screenEffectPixels = new Uint8Array(
+    memory.buffer,
+    instance.exports.WasmDisplayScreenEffectBuffer(),
+    instance.exports.WasmDisplayScreenEffectBufferSize(),
+  );
+  screenEffectSources = new Int16Array(
+    memory.buffer,
+    instance.exports.WasmDisplayScreenEffectSourceBuffer(),
+    instance.exports.WasmDisplayScreenEffectSourceBufferSize() / 2,
+  );
 }
 
 function refreshObjectEventSpriteFlags() {
@@ -968,9 +981,12 @@ function render() {
   if (!presenter || presenterRecoveryPromise || runtimeStopped) return;
   updateVisualModeTransition();
   lastSceneKind = instance.exports.WasmDisplaySceneKind();
-  const enhanced = activeVisualMode === 'hd2d' && lastSceneKind === 1;
+  const enhanced = activeVisualMode === 'hd2d' && lastSceneKind !== 0;
+  // Scene kind 2 keeps the projected world under screen-space transition
+  // effects, which the engine exports as a per-pixel composite.
+  const screenEffects = enhanced && lastSceneKind === 2;
   if (enhanced) {
-    instance.exports.WasmRenderHd2dFrame();
+    instance.exports.WasmRenderHd2dFrame(screenEffects ? 1 : 0);
     refreshObjectEventSpriteFlags();
   } else instance.exports.WasmRenderFrame();
   presenter.present({
@@ -995,7 +1011,10 @@ function render() {
     objectSourceCount: instance.exports.WasmDisplayObjectSourceCount(),
     objectPixels,
     objectPriorities,
+    screenEffectPixels,
+    screenEffectSources,
     enhanced,
+    screenEffects,
     shading: renderedShadingStrength,
     perspective: activeVisualMode === 'hd2d' ? perspectiveStrength : 0,
     zoom: activeVisualMode === 'hd2d' ? zoomStrength : 0,
@@ -1651,6 +1670,12 @@ function automationWarp(mapGroup, mapNum, x, y) {
   instance.exports.ResetInitialPlayerAvatarState();
 }
 
+function automationBattleTransition(transition) {
+  if (!Number.isInteger(transition) || transition < 0 || transition >= BATTLE_TRANSITION_COUNT)
+    throw new Error('invalid battle transition');
+  instance.exports.BattleTransition_StartOnField(transition);
+}
+
 async function automationLoadSave(encoded) {
   const bytes = base64ToBytes(encoded);
   const normalized = normalizeSaveForCurrentBuild(bytes);
@@ -1810,6 +1835,7 @@ function automationApi() {
     }, false, animate),
     startNewGame: () => instance.exports.WasmStartNewGameForAutomation(),
     warp: automationWarp,
+    startBattleTransition: automationBattleTransition,
     runToFrame,
     screenshot: async () => { await presenter.ready(); return canvas.toDataURL('image/png'); },
     benchmarkPresentation,

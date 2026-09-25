@@ -595,6 +595,32 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+// Classic transitions (swirls, shuffles, mosaics, wipes, fades) are exported
+// as final = add + weight * world(source) per screen pixel, so the effect
+// warps and tints the projected scene instead of the flat frame.
+const SCREEN_EFFECT_SHADER = FULLSCREEN_VERTEX + /* wgsl */ `
+@group(0) @binding(0) var sceneTexture: texture_2d<f32>;
+@group(0) @binding(1) var effectTexture: texture_2d<f32>;
+@group(0) @binding(2) var sourceTexture: texture_2d<i32>;
+
+@fragment
+fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+  let sceneSize = vec2i(textureDimensions(sceneTexture));
+  let screenSize = vec2i(textureDimensions(effectTexture));
+  let scale = max(sceneSize / screenSize, vec2i(1));
+  let pixel = vec2i(input.position.xy);
+  let screen = clamp(pixel / scale, vec2i(0), screenSize - 1);
+  let add = textureLoad(effectTexture, screen, 0).rgb;
+  let source = textureLoad(sourceTexture, screen, 0);
+  if (source.z <= 0) { return vec4f(add, 1.0); }
+  var sample = pixel + (source.xy - screen) * scale;
+  if ((source.w & 1) != 0) { sample = source.xy * scale + scale / 2; }
+  // Background layers wrap on hardware, so displaced lines wrap too.
+  let world = textureLoad(sceneTexture, ((sample % sceneSize) + sceneSize) % sceneSize, 0).rgb;
+  return vec4f(min(add + world * (f32(source.z) / 256.0), vec3f(1.0)), 1.0);
+}
+`;
+
 const TILE_SIZE = 8;
 const BILLBOARD_DEPTH_BIAS = 2;
 const CAMERA_HEIGHT = 480;
@@ -657,6 +683,8 @@ class WebGpuPresenter {
     });
     this.bgPriorityTexture = this.createTexture('world BG priority', 'r8uint', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST, worldWidth, worldHeight);
     this.uiTexture = this.createTexture('flat BG0 interface', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
+    this.screenEffectTexture = this.createTexture('screen effect overlay', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
+    this.screenEffectSourceTexture = this.createTexture('screen effect world sources', 'rgba16sint', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
     this.sceneWidth = width * scale;
     this.sceneHeight = height * scale;
     this.sceneTexture = this.createTexture('high-resolution 3D scene', 'rgba8unorm', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, this.sceneWidth, this.sceneHeight);
@@ -926,6 +954,13 @@ class WebGpuPresenter {
       fragment: { module: presentModule, entryPoint: 'fragmentMain', targets: [{ format: this.format }] },
       primitive: { topology: 'triangle-list' },
     });
+    const screenEffectModule = device.createShaderModule({ label: 'screen effect composite shader', code: SCREEN_EFFECT_SHADER });
+    this.screenEffectPipeline = device.createRenderPipeline({
+      label: 'screen effect composite over the projected scene', layout: 'auto',
+      vertex: { module: screenEffectModule, entryPoint: 'vertexMain' },
+      fragment: { module: screenEffectModule, entryPoint: 'fragmentMain', targets: [{ format: this.format }] },
+      primitive: { topology: 'triangle-list' },
+    });
     const layout = this.presentPipeline.getBindGroupLayout(0);
     this.presentLayout = layout;
     this.finalBindGroup = device.createBindGroup({ layout, entries: [{ binding: 0, resource: this.finalTexture.createView() }] });
@@ -948,6 +983,13 @@ class WebGpuPresenter {
     });
     this.scenePresentBindGroup = this.device.createBindGroup({
       layout: this.presentLayout, entries: [{ binding: 0, resource: this.gradedTexture.createView() }],
+    });
+    this.screenEffectBindGroup = this.device.createBindGroup({
+      layout: this.screenEffectPipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: this.gradedTexture.createView() },
+        { binding: 1, resource: this.screenEffectTexture.createView() },
+        { binding: 2, resource: this.screenEffectSourceTexture.createView() },
+      ],
     });
   }
 
@@ -2051,11 +2093,11 @@ class WebGpuPresenter {
   }
 
   buildFrameLayers(finalPixels, layerPixels, objectIds, objectPixels, objectPriorities,
-                   objectDescriptors, objectEventSpriteFlags, objectSourceCount, tilt, zoom) {
+                   objectDescriptors, objectEventSpriteFlags, objectSourceCount, tilt, zoom, screenEffects) {
     this.uiPixels.fill(0);
     for (const pixels of this.objectPixels) pixels.length = 0;
     for (let index = 0; index < layerPixels.length; index++) {
-      if ((layerPixels[index] & 0x01) !== 0) {
+      if (!screenEffects && (layerPixels[index] & 0x01) !== 0) {
         const o = index * 4;
         this.uiPixels[o] = finalPixels[o];
         this.uiPixels[o + 1] = finalPixels[o + 1];
@@ -2066,7 +2108,8 @@ class WebGpuPresenter {
       if (id < 128) this.objectPixels[id].push(index);
     }
 
-    const hasUiPlane = layerPixels.some((mask) => (mask & 0x01) !== 0);
+    // The screen effect composite already carries BG0 and overlay sprites.
+    const hasUiPlane = !screenEffects && layerPixels.some((mask) => (mask & 0x01) !== 0);
     const objectTouchesUi = (x, y, width, height) => {
       const x0 = Math.max(0, x), y0 = Math.max(0, y);
       const x1 = Math.min(this.width, x + width), y1 = Math.min(this.height, y + height);
@@ -2198,8 +2241,9 @@ class WebGpuPresenter {
     );
   }
 
-  present({ finalPixels, worldPixels, worldStructuralAlphaPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldReceiverPixels, worldFacadePixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, enhanced, shading, perspective, zoom, optics }) {
+  present({ finalPixels, worldPixels, worldStructuralAlphaPixels, worldHeightPixels, worldGroundHeightPixels, worldGeometryPixels, worldReceiverPixels, worldFacadePixels, worldGridOffsetX, worldGridOffsetY, worldPixelOriginX, worldPixelOriginY, layerPixels, objectIds, bgPriorities, objectSourcePixels, objectDescriptors, objectEventSpriteFlags, objectSourceCount, objectPixels, objectPriorities, screenEffectPixels, screenEffectSources, enhanced, screenEffects, shading, perspective, zoom, optics }) {
     const encoder = this.device.createCommandEncoder({ label: 'pokeemerald frame encoder' });
+    let presentPipeline = this.presentPipeline;
     let presentBindGroup = this.finalBindGroup;
     if (enhanced) {
       this.writeTexture(this.worldTexture, worldPixels, this.worldWidth, this.worldHeight);
@@ -2211,7 +2255,7 @@ class WebGpuPresenter {
       );
       const billboardVertexCount = this.buildFrameLayers(
         finalPixels, layerPixels, objectIds, objectPixels, objectPriorities,
-        objectDescriptors, objectEventSpriteFlags, objectSourceCount, perspective, zoom,
+        objectDescriptors, objectEventSpriteFlags, objectSourceCount, perspective, zoom, screenEffects,
       );
       const objectFootRows = this.measureObjectFootRows(objectDescriptors, objectSourceCount, objectEventSpriteFlags, objectSourcePixels);
       const castShadowVertexCount = this.buildProjectedShadows(objectDescriptors, objectSourceCount, objectEventSpriteFlags, objectFootRows);
@@ -2289,15 +2333,22 @@ class WebGpuPresenter {
       });
       cinematicPass.setPipeline(this.cinematicPipeline); cinematicPass.setBindGroup(0, this.cinematicBindGroup); cinematicPass.draw(3); cinematicPass.end();
 
-      const uiPass = encoder.beginRenderPass({ label: 'flat interface pass', colorAttachments: [{ view: this.gradedTexture.createView(), loadOp: 'load', storeOp: 'store' }] });
-      uiPass.setPipeline(this.uiPipeline); uiPass.setBindGroup(0, this.uiBindGroup); uiPass.draw(3); uiPass.end();
-      presentBindGroup = this.scenePresentBindGroup;
+      if (screenEffects) {
+        this.writeTexture(this.screenEffectTexture, screenEffectPixels);
+        this.writeTexture(this.screenEffectSourceTexture, screenEffectSources, this.width, this.height, 8);
+        presentPipeline = this.screenEffectPipeline;
+        presentBindGroup = this.screenEffectBindGroup;
+      } else {
+        const uiPass = encoder.beginRenderPass({ label: 'flat interface pass', colorAttachments: [{ view: this.gradedTexture.createView(), loadOp: 'load', storeOp: 'store' }] });
+        uiPass.setPipeline(this.uiPipeline); uiPass.setBindGroup(0, this.uiBindGroup); uiPass.draw(3); uiPass.end();
+        presentBindGroup = this.scenePresentBindGroup;
+      }
     } else {
       this.writeTexture(this.finalTexture, finalPixels);
     }
 
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.context.getCurrentTexture().createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }] });
-    pass.setPipeline(this.presentPipeline); pass.setBindGroup(0, presentBindGroup); pass.draw(3); pass.end();
+    pass.setPipeline(presentPipeline); pass.setBindGroup(0, presentBindGroup); pass.draw(3); pass.end();
     this.device.queue.submit([encoder.finish()]);
   }
 
@@ -2308,7 +2359,7 @@ class WebGpuPresenter {
     this.disposed = true;
     this.device.removeEventListener('uncapturederror', this.uncapturedErrorHandler);
     this.context.unconfigure();
-    for (const resource of [this.finalTexture,this.worldTexture,this.structuralAlphaTexture,this.objectTexture,this.bgPriorityTexture,this.uiTexture,this.sceneTexture,this.castShadowTexture,this.gradedTexture,this.depthTexture,this.focusDepthTexture,this.structuralShadowTexture,this.vertexBuffer,this.billboardVertexBuffer,this.castShadowVertexBuffer,this.cameraBuffer]) resource.destroy();
+    for (const resource of [this.finalTexture,this.worldTexture,this.structuralAlphaTexture,this.objectTexture,this.bgPriorityTexture,this.uiTexture,this.screenEffectTexture,this.screenEffectSourceTexture,this.sceneTexture,this.castShadowTexture,this.gradedTexture,this.depthTexture,this.focusDepthTexture,this.structuralShadowTexture,this.vertexBuffer,this.billboardVertexBuffer,this.castShadowVertexBuffer,this.cameraBuffer]) resource.destroy();
     this.device.destroy();
   }
 
