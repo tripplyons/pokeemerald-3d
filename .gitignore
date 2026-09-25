@@ -51,3 +51,5 @@ prefabs.json
 /wasm-replay-output/
 /wasm-replay-output-*/
 *.sav
+/.pi/
+/wrangler.*.toml
