@@ -85,6 +85,7 @@ typedef char HdSurfaceOpenDeckFitsPackedGeometry[
 #define HD2D_CLIFF_BAND_MIN_WIDTH 4
 #define HD2D_CLIFF_BAND_MIN_SHORT_WIDTH 3
 #define HD2D_CLIFF_BAND_MAX_HEIGHT 120
+#define HD2D_CLIFF_MOUND_MAX_CELLS 48
 
 #define LAYER_BG0 0x01
 #define LAYER_BG1 0x02
@@ -2200,7 +2201,8 @@ static bool8 HdMapSampleHasFacadeSupportUncached(u32 index, u32 sampleCols, u32 
 {
     if (index < sampleCols
      || index + sampleCols >= sampleCols * sampleRows
-     || !sHdMapSamples[index].valid)
+     || !sHdMapSamples[index].valid
+     || sHdSampleBaseSurfaces[index] == HD_SURFACE_TERRAIN)
         return FALSE;
     // Natural passages reuse door behavior so actors can walk under their
     // canopy. Leaf-painted doors are vegetation, not building entrances.
@@ -2975,6 +2977,75 @@ static void HdPublishCliffBandCell(u32 sampleX, u32 sampleY, u32 sampleCols,
     }
 }
 
+static bool8 HdMapSampleIsCaveMouth(u32 index, u32 sampleCols)
+{
+    const u32 sampleX = index % sampleCols;
+
+    // A door or warp cut into the bottom of an earth sheet opens into the
+    // mass: rock stands above it and beside it. Building doors sit in wall
+    // art, which never passes the earth cliff-seed test.
+    if (!sHdMapSamples[index].valid
+     || sHdMapSamples[index].collision
+     || !(HdMapSampleIsDoorCourse(index) || sHdMapSamples[index].hasWarpEntrance)
+     || HdMapSampleIsFoliageArt(index))
+        return FALSE;
+    if (index < sampleCols || !HdMapSampleIsCliffSeed(index - sampleCols))
+        return FALSE;
+    return (sampleX > 0 && HdMapSampleIsCliffSeed(index - 1))
+        || (sampleX + 1 < sampleCols && HdMapSampleIsCliffSeed(index + 1));
+}
+
+static bool8 HdCliffSeedMassIsFreeStanding(u32 seed, u32 sampleCols, u32 sampleRows)
+{
+    static u16 visit[HD2D_SAMPLE_COLS * HD2D_SAMPLE_ROWS];
+    static u16 stamp;
+    static const s8 offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    u16 queue[HD2D_CLIFF_MOUND_MAX_CELLS];
+    u32 queueStart = 0;
+    u32 queueEnd = 0;
+
+    if (++stamp == 0)
+    {
+        memset(visit, 0, sizeof(visit));
+        stamp = 1;
+    }
+    visit[seed] = stamp;
+    queue[queueEnd++] = seed;
+    while (queueStart < queueEnd)
+    {
+        const u32 sample = queue[queueStart++];
+        const s32 sampleX = sample % sampleCols;
+        const s32 sampleY = sample / sampleCols;
+
+        for (u32 d = 0; d < ARRAY_COUNT(offsets); d++)
+        {
+            const s32 nx = sampleX + offsets[d][0];
+            const s32 ny = sampleY + offsets[d][1];
+            u32 next;
+
+            // A mass clipped by the sample window may continue offscreen.
+            if (nx < 0 || ny < 0 || nx >= (s32)sampleCols || ny >= (s32)sampleRows)
+                return FALSE;
+            next = ny * sampleCols + nx;
+            if (visit[next] == stamp)
+                continue;
+            // Walk the whole blocked mass, rim tiles included. A mound
+            // closes on open ground or water within a few tiles; a mountain
+            // face keeps running into more collision.
+            if (!sHdMapSamples[next].valid
+             || !sHdMapSamples[next].collision
+             || MetatileBehavior_IsSurfableWaterOrUnderwater(
+                    UNPACK_BEHAVIOR(sHdMapAttributes[next])))
+                continue;
+            if (queueEnd >= ARRAY_COUNT(queue))
+                return FALSE;
+            visit[next] = stamp;
+            queue[queueEnd++] = next;
+        }
+    }
+    return TRUE;
+}
+
 static bool8 HdCliffRowRun(u32 sampleY, u32 sampleCols, u32 startX, u32 endX)
 {
     u32 faceCells = 0;
@@ -3010,6 +3081,8 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
             u32 depth;
             u32 count = 0;
             u16 component[HD2D_SAMPLE_COLS * 8];
+            u16 mouths[8];
+            u32 mouthCount = 0;
             bool8 touchesTerrain = FALSE;
             s8 height;
             u16 faceReceiver;
@@ -3068,6 +3141,10 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                         if (surface == HD_SURFACE_TERRAIN)
                             touchesTerrain = TRUE;
                     }
+                    if (bandY + 1 <= bottom
+                     && mouthCount < ARRAY_COUNT(mouths)
+                     && HdMapSampleIsCaveMouth(sample + sampleCols, sampleCols))
+                        mouths[mouthCount++] = sample + sampleCols;
                 }
             }
             if (count < HD2D_CLIFF_BAND_MIN_SHORT_WIDTH)
@@ -3076,18 +3153,25 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                 continue;
             }
             // Collision is not height. A sheet with walkable ground in front
-            // matches cave mouths, building bases, and plaza curbs. Only an
-            // existing terrain cap (cave / authored cliff) proves a cliff.
+            // matches building bases and plaza curbs. Only an existing
+            // terrain cap (cave / authored cliff) or an entrance cut into a
+            // free-standing sheet proves a rock mass. A mouth in a wider
+            // mountain proves nothing: one band height across its stepped
+            // tiers stands up as a striped tower.
             // MB_MOUNTAIN_TOP is a wild-battle tag, not a raise license, and
             // water is a drop, not proof of a cliff.
-            if (!touchesTerrain)
+            if (!touchesTerrain && mouthCount != 0
+             && !HdCliffSeedMassIsFreeStanding(component[0], sampleCols, sampleRows))
+                mouthCount = 0;
+            if (!touchesTerrain && mouthCount == 0)
             {
                 x = end + 1;
                 continue;
             }
-            height = (s8)(depth * 16);
-            if (height > HD2D_CLIFF_BAND_MAX_HEIGHT)
-                height = HD2D_CLIFF_BAND_MAX_HEIGHT;
+            // Cap before narrowing: a 9-row sheet is 144px and wraps negative
+            // as s8.
+            height = depth * 16 > HD2D_CLIFF_BAND_MAX_HEIGHT
+                ? HD2D_CLIFF_BAND_MAX_HEIGHT : (s8)(depth * 16);
             faceCourses = depth * 2;
             heightCourses = (u32)height / HD2D_COURSE_HEIGHT;
             if (faceCourses > HD2D_RECEIVER_OFFSET_MASK)
@@ -3104,6 +3188,19 @@ static void HdRaiseBlockedCliffBands(u32 sampleCols, u32 sampleRows,
                 const u32 sampleY = sample / sampleCols;
 
                 raised[sample] = 1;
+                HdPublishCliffBandCell(sampleX, sampleY, sampleCols, courseCols,
+                                       height, sampleY == bottom ? faceReceiver : 0);
+            }
+            // The mouth is painted into the face. Raising it with the mass
+            // keeps the face whole instead of notching a hole to the ground.
+            for (u32 i = 0; i < mouthCount; i++)
+            {
+                const u32 sampleX = mouths[i] % sampleCols;
+                const u32 sampleY = mouths[i] / sampleCols;
+
+                if (raised[mouths[i]])
+                    continue;
+                raised[mouths[i]] = 1;
                 HdPublishCliffBandCell(sampleX, sampleY, sampleCols, courseCols,
                                        height, sampleY == bottom ? faceReceiver : 0);
             }
